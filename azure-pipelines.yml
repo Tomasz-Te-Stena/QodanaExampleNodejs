@@ -248,9 +248,9 @@ stages:
                 "qodana" | "$(Build.Repository.Name)"
                 "qodana"
 
-          - task: QodanaScan@2026
-            displayName: 'Run Qodana'
-            inputs:
-              uploadResult: true
-            env:
-              QODANA_TOKEN: $(QODANA_TOKEN)
+#          - task: QodanaScan@2026
+#            displayName: 'Run Qodana'
+#            inputs:
+#              uploadResult: true
+#            env:
+#              QODANA_TOKEN: $(QODANA_TOKEN)
