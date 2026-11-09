@@ -43,6 +43,13 @@ stages:
             displayName: 'Install dependencies'
 
           # ====================================================
+          # ESLINT
+          # ====================================================
+          - script: |
+              npm run lint
+            displayName: 'Run ESLint'
+
+          # ====================================================
           # VALIDATE JAVASCRIPT SYNTAX
           # ====================================================
           - script: |

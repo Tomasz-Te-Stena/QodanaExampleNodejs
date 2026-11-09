@@ -6,11 +6,17 @@
   "scripts": {
     "start": "node server.js",
     "test": "jest",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.14.0",
     "jest": "^30.5.2",
     "jest-junit": "^16.0.0",
+    "prettier": "^3.9.10",
     "supertest": "^7.3.2"
   },
   "jest": {
