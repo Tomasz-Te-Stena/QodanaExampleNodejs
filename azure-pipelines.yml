@@ -256,38 +256,43 @@ stages:
 #              QODANA_TOKEN: $(QODANA_TOKEN)
 
       # ========================================================
-      # CODEQL SAST
+      # SEMGREP SAST
       # ========================================================
-      - job: CodeQL
-        displayName: 'CodeQL SAST'
+      - job: Semgrep
+        displayName: 'Semgrep SAST'
 
         steps:
           - checkout: self
             displayName: 'Checkout repository'
             clean: true
 
-          - task: UseNode@1
-            displayName: 'Install Node.js $(nodeVersion)'
+          # ====================================================
+          # INSTALL PYTHON
+          # Semgrep CLI is distributed as a Python package.
+          # This does NOT change your application from Node.js.
+          # ====================================================
+          - task: UsePythonVersion@0
+            displayName: 'Install Python for Semgrep'
             inputs:
-              version: '$(nodeVersion)'
+              versionSpec: '3.12'
+              addToPath: true
 
           # ====================================================
-          # INITIALIZE CODEQL
-          # ====================================================
-          - task: AdvancedSecurity-Codeql-Init@1
-            displayName: 'Initialize CodeQL'
-            inputs:
-              languages: 'javascript'
-
-          # ====================================================
-          # INSTALL DEPENDENCIES
+          # INSTALL SEMGREP
           # ====================================================
           - script: |
-              npm ci
-            displayName: 'Install Node.js dependencies'
+              python -m pip install --upgrade pip
+              pip install semgrep
+              semgrep --version
+            displayName: 'Install Semgrep'
 
           # ====================================================
-          # RUN CODEQL SAST
+          # RUN SAST
           # ====================================================
-          - task: AdvancedSecurity-Codeql-Analyze@1
-            displayName: 'Run CodeQL SAST'
+          - script: |
+              semgrep scan \
+                --config p/javascript \
+                --config p/nodejs \
+                --error \
+                .
+            displayName: 'Run Semgrep SAST'
