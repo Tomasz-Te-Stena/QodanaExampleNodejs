@@ -239,14 +239,14 @@ stages:
               npm ci
             displayName: 'Install Node.js dependencies'
 
-          - task: Cache@2
-            displayName: 'Cache Qodana'
-            inputs:
-              key: '"qodana" | "$(Build.Repository.Name)" | "$(Build.SourceBranchName)"'
-              path: '$(Agent.TempDirectory)/qodana/cache'
-              restoreKeys: |
-                "qodana" | "$(Build.Repository.Name)"
-                "qodana"
+#          - task: Cache@2
+#            displayName: 'Cache Qodana'
+#            inputs:
+#              key: '"qodana" | "$(Build.Repository.Name)" | "$(Build.SourceBranchName)"'
+#              path: '$(Agent.TempDirectory)/qodana/cache'
+#              restoreKeys: |
+#                "qodana" | "$(Build.Repository.Name)"
+#                "qodana"
 
 #          - task: QodanaScan@2026
 #            displayName: 'Run Qodana'
