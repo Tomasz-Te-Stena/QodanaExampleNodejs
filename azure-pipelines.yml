@@ -254,3 +254,40 @@ stages:
 #              uploadResult: true
 #            env:
 #              QODANA_TOKEN: $(QODANA_TOKEN)
+
+      # ========================================================
+      # CODEQL SAST
+      # ========================================================
+      - job: CodeQL
+        displayName: 'CodeQL SAST'
+
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: UseNode@1
+            displayName: 'Install Node.js $(nodeVersion)'
+            inputs:
+              version: '$(nodeVersion)'
+
+          # ====================================================
+          # INITIALIZE CODEQL
+          # ====================================================
+          - task: AdvancedSecurity-Codeql-Init@1
+            displayName: 'Initialize CodeQL'
+            inputs:
+              languages: 'javascript'
+
+          # ====================================================
+          # INSTALL DEPENDENCIES
+          # ====================================================
+          - script: |
+              npm ci
+            displayName: 'Install Node.js dependencies'
+
+          # ====================================================
+          # RUN CODEQL SAST
+          # ====================================================
+          - task: AdvancedSecurity-Codeql-Analyze@1
+            displayName: 'Run CodeQL SAST'
