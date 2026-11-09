@@ -1,0 +1,249 @@
+trigger:
+  - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  nodeVersion: '22.x'
+
+stages:
+
+  # ============================================================
+  # IMPLEMENT
+  # ============================================================
+  - stage: Implement
+    displayName: 'Build'
+    jobs:
+      - job: Build
+        displayName: 'Build Node.js application'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          # ====================================================
+          # INSTALL NODE.JS
+          # ====================================================
+          - task: NodeTool@0
+            displayName: 'Install Node.js $(nodeVersion)'
+            inputs:
+              versionSpec: '$(nodeVersion)'
+
+          - script: |
+              node --version
+              npm --version
+            displayName: 'Show Node.js information'
+
+          # ====================================================
+          # INSTALL DEPENDENCIES
+          # ====================================================
+          - script: |
+              npm ci
+            displayName: 'Install dependencies'
+
+          # ====================================================
+          # VALIDATE JAVASCRIPT SYNTAX
+          # ====================================================
+          - script: |
+              node --check server.js
+            displayName: 'Validate JavaScript syntax'
+
+
+  # ============================================================
+  # TESTING
+  # ============================================================
+  - stage: Testing
+    displayName: 'Testing'
+    dependsOn: Implement
+
+    jobs:
+      - job: Tests
+        displayName: 'Run tests'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: NodeTool@0
+            displayName: 'Install Node.js $(nodeVersion)'
+            inputs:
+              versionSpec: '$(nodeVersion)'
+
+          - script: |
+              npm ci
+            displayName: 'Install dependencies'
+
+          # ====================================================
+          # UNIT TESTS + COVERAGE
+          # ====================================================
+          - script: |
+              mkdir -p "$(Agent.TempDirectory)/TestResults"
+              mkdir -p "$(Agent.TempDirectory)/Coverage"
+
+              npx jest \
+                --ci \
+                --coverage \
+                --reporters=default \
+                --reporters=jest-junit
+            displayName: 'Unit tests with coverage'
+            env:
+              JEST_JUNIT_OUTPUT_DIR: $(Agent.TempDirectory)/TestResults
+              JEST_JUNIT_OUTPUT_NAME: test-results.xml
+
+          # ====================================================
+          # COPY COVERAGE
+          # ====================================================
+          - script: |
+              cp coverage/cobertura-coverage.xml \
+                "$(Agent.TempDirectory)/Coverage/coverage.xml"
+            displayName: 'Prepare coverage report'
+            condition: succeededOrFailed()
+
+          # ====================================================
+          # PUBLISH TEST RESULTS
+          # ====================================================
+          - task: PublishTestResults@2
+            displayName: 'Publish test results'
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: '$(Agent.TempDirectory)/TestResults/*.xml'
+              failTaskOnFailedTests: true
+              testRunTitle: 'Node.js unit tests'
+
+          # ====================================================
+          # PUBLISH CODE COVERAGE
+          # ====================================================
+          - task: PublishCodeCoverageResults@2
+            displayName: 'Publish code coverage'
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: '$(Agent.TempDirectory)/Coverage/coverage.xml'
+
+
+  # ============================================================
+  # SECURITY
+  # ============================================================
+  - stage: Security
+    displayName: 'Security'
+    dependsOn: Testing
+
+    jobs:
+
+      # ========================================================
+      # TRIVY VULNERABILITY / SCA SCAN
+      # ========================================================
+      - job: TrivyVulnerabilities
+        displayName: 'Trivy SCA'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: NodeTool@0
+            displayName: 'Install Node.js $(nodeVersion)'
+            inputs:
+              versionSpec: '$(nodeVersion)'
+
+          # Install dependencies so package-lock/node_modules
+          # are available for analysis.
+          - script: |
+              npm ci
+            displayName: 'Install Node.js dependencies'
+
+          - script: |
+              sudo apt-get install -y wget gnupg
+
+              wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+                | gpg --dearmor \
+                | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+
+              echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+                | sudo tee /etc/apt/sources.list.d/trivy.list
+
+              sudo apt-get update
+              sudo apt-get install -y trivy
+
+              trivy --version
+            displayName: 'Install Trivy'
+
+          - script: |
+              trivy fs \
+                --scanners vuln \
+                --severity HIGH,CRITICAL \
+                --exit-code 1 \
+                "$(Build.SourcesDirectory)"
+            displayName: 'Scan Node.js dependencies with Trivy'
+
+
+      # ========================================================
+      # TRIVY SECRET SCAN
+      # ========================================================
+      - job: TrivySecrets
+        displayName: 'Trivy Secrets Scanning'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - script: |
+              sudo apt-get install -y wget gnupg
+
+              wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+                | gpg --dearmor \
+                | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+
+              echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+                | sudo tee /etc/apt/sources.list.d/trivy.list
+
+              sudo apt-get update
+              sudo apt-get install -y trivy
+
+              trivy --version
+            displayName: 'Install Trivy'
+
+          - script: |
+              trivy fs \
+                --scanners secret \
+                --secret-config "$(Build.SourcesDirectory)/trivy-secret.yaml" \
+                --exit-code 1 \
+                "$(Build.SourcesDirectory)"
+            displayName: 'Scan secrets with Trivy'
+
+
+      # ========================================================
+      # QODANA SAST
+      # ========================================================
+      - job: Qodana
+        displayName: 'Qodana SAST'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+            persistCredentials: true
+
+          - task: NodeTool@0
+            displayName: 'Install Node.js $(nodeVersion)'
+            inputs:
+              versionSpec: '$(nodeVersion)'
+
+          - script: |
+              npm ci
+            displayName: 'Install Node.js dependencies'
+
+          - task: Cache@2
+            displayName: 'Cache Qodana'
+            inputs:
+              key: '"qodana" | "$(Build.Repository.Name)" | "$(Build.SourceBranchName)"'
+              path: '$(Agent.TempDirectory)/qodana/cache'
+              restoreKeys: |
+                "qodana" | "$(Build.Repository.Name)"
+                "qodana"
+
+          - task: QodanaScan@2026
+            displayName: 'Run Qodana'
+            inputs:
+              uploadResult: true
+            env:
+              QODANA_TOKEN: $(QODANA_TOKEN)

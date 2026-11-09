@@ -1,0 +1,21 @@
+{
+  "name": "vulnerable-node-api",
+  "version": "1.0.0",
+  "description": "Intentionally vulnerable Node.js API for DevSecOps testing",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "jest --coverage"
+  },
+  "devDependencies": {
+    "jest": "^30.0.0",
+    "jest-junit": "^16.0.0"
+  },
+  "jest": {
+    "collectCoverage": true,
+    "coverageReporters": [
+      "text",
+      "cobertura"
+    ]
+  }
+}
