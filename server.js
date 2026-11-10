@@ -17,44 +17,27 @@ const _ = require('lodash');
 // SECURITY ERROR #1: Hard-coded secret
 const API_SECRET = 'super-secret-production-key-12345';
 
-// SECURITY ERROR #7: Hard-coded private key.
-// Throwaway RSA key generated only for this demo - not used anywhere.
-// Detected by: Trivy secret scan (trivy fs / trivy image --scanners secret).
-const TOKEN_SIGNING_KEY = `-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDGrRR3KDH/Lvpx
-lnDue+QI+gTXc8713zZbzitqgT2wsdFNvS/NsSS4GkYnkJPg81wX+GE8tW0QtvDV
-P3oTrmD5XAE9Xk9/QctJ2L07mNzSeu0vQHAZcD6FoPcjVf21eDJF9Z3G+SWH5/nQ
-qbKrRwxOwHym0kaSY4wnl2CwjerkQcH4PTKfu0OIbbezP1n8gfUDMF7r0B8/Eupl
-6jVw3eRIwzOzWt0NIwDhsv6CJPp1OQfBo5Q15UpD2v4zbKWvBtIgljtJ2/+Qxzth
-WHLOal9fDWmFVE1UD0McyZSE+5evQcdl3ynrgRGhqRHI5EcyEGjtBThwvK/iT3KU
-n7PG6FFXAgMBAAECggEAA+arHl8uLXi31y92iTWVN9iSQW7B3hG4yLBcKYu0cTnp
-8QZUICGoexWc/LLkjHK1g2JPpSME1g1ZiOkQVb7t+DImc2oyJ76xe1eOTlNv5pFz
-rc1XRiXuPFkkRnqDmvgWDfScLqd+uqlDPlB5XyPr1HIIII3EGqS/au7t1ERScT07
-xu3Vl44vi1C1R7TxPaT3iOiLMLsBrZdX1Y1j06PBlJ9qXUlK8PluHWcwtte/a3rp
-FOG18BP0iRHLPH2VrzwUFLp6XGr0FgAZtVVSC/fhk3bi4bM0Qk+TuiunRHCmZWpQ
-QvuP67lJdieopO/Id5prlOcl2DlOMPrljVmEZlG/rQKBgQDomvNck1JC6ZeZ9YO1
-BwCMztGZBa8SId+1ssYBNWWLGVmUpOQSP76xjstwPwVzCbBw0iNMtC8kSwhTN+Qs
-wBmnVEV4uULrv6Wa3YlbeIdL/h+KRMYASPhqWriajiHIE+Lv6lCLJDt6/UnZmEso
-1XfeBuLhpGy47tJ2j6O1vABU9QKBgQDaqIf3hm+/GnWUQj9rBIRjfO8Mu4zkz0dH
-wJdpxh0Gc3u6K+AmoBe78amhJ5xo53B5AOqUzY+ylUFZZQF9xuM5Su2BXfjVBywY
-lk3wHtQlg0DkmziqkweWVHEs37DlPrkf1k7QQc83djpByUOpJL/2Ol8yrufv3Xzx
-5BRYhoy9mwKBgE4r7Qe6txWnvXxPZ5EKJmQsCYK8x0Z3veApkaPMVzD1Nwbel4uO
-gr7Xd4VkmKc9pV91L8nScFlpIgYdrYBgmv6CMsrMsDHceYJfW48zJX0jjWQBku17
-mIjdrla6152PGWB5xdHNPnQp9Yy8Qt4ZR6yFcfBVOvi3wmF4CpPD9/SVAoGAdts1
-TW9ePtr7HuQD5QBHlmzK5HjuVVH2xSIDLBPsox0THFfNODG9tQPf2SHW+48SrDO7
-T7eNbN2E8DrfXKdHzFTWVYPnRqTna1YId4XKe7mlBJ77Zn0Vmrm761CMr5AwwQWV
-Qc8D/HnfoPLuPHslfYqtRLeei9wxlqsMBDLfPhECgYEAwJXSeC9N70QDgo4DlDw/
-zxUnXPtsBlNBHBUUOs8TQUMmUx6tvGzNAIKgjQsGAETxjvdswC9CpErjvLAITo0I
-Xthkyh2ZnxTOeXWcn7nl/ftnBULYaC2gn4bqDbfv3hEe51+qvkcIG3PUmJo3mZDe
-nlBT0lj6NLyD1ri6v6jj49M=
------END PRIVATE KEY-----`;
+// FIXED (was SECURITY ERROR #7: hard-coded private key).
+// The signing key is no longer in the source code. It is read at
+// runtime from the TOKEN_SIGNING_KEY environment variable (a PEM
+// private key; "\n" escapes are accepted so it fits in one line,
+// e.g. an Azure DevOps secret variable or a Docker/K8s secret).
+function getSigningKey() {
+    const pem = process.env.TOKEN_SIGNING_KEY;
 
-// Signs "<payload>.<signature>" with the hard-coded key above.
+    if (!pem) {
+        throw new Error('TOKEN_SIGNING_KEY environment variable is not set');
+    }
+
+    return pem.replace(/\\n/g, '\n');
+}
+
+// Signs "<payload>.<signature>" with the key from the environment.
 function signToken(username) {
     const payload = JSON.stringify({ sub: username, iat: Date.now() });
     const encoded = encodeURIComponent(payload);
     const signature = crypto
-        .sign('sha256', Buffer.from(encoded), TOKEN_SIGNING_KEY)
+        .sign('sha256', Buffer.from(encoded), getSigningKey())
         .toString('base64url');
 
     return encoded + '.' + signature;
@@ -143,12 +126,29 @@ function requestHandler(req, res) {
 
     // GET /api/token?user=alice
     if (req.method === 'GET' && path === '/api/token') {
+        let token;
+
+        try {
+            token = signToken(query.user || 'anonymous');
+        } catch (err) {
+            // Missing / invalid key: report it without leaking details.
+            console.error('Token signing failed:', err.message);
+
+            res.writeHead(503, {
+                'Content-Type': 'application/json'
+            });
+
+            return res.end(JSON.stringify({
+                error: 'Token signing is not configured'
+            }));
+        }
+
         res.writeHead(200, {
             'Content-Type': 'application/json'
         });
 
         return res.end(JSON.stringify({
-            token: signToken(query.user || 'anonymous')
+            token
         }));
     }
 

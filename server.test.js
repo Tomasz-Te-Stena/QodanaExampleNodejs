@@ -8,6 +8,8 @@ jest.mock('child_process', () => ({
 const request = require('supertest');
 const http = require('http');
 const fs = require('fs');
+const crypto = require('crypto');
+const { Buffer } = require('buffer');
 const { exec } = require('child_process');
 
 const { requestHandler } = require('./server');
@@ -147,30 +149,88 @@ describe('Vulnerable REST API', () => {
             .expect('Content-Type', /json/);
     });
 
-    test('GET /api/token returns a signed token for the user', async () => {
-        const response = await request(server)
-            .get('/api/token')
-            .query({
-                user: 'alice'
-            })
-            .expect(200)
-            .expect('Content-Type', /json/);
+    describe('GET /api/token', () => {
+        // A fresh key pair per test run - no key is stored anywhere.
+        const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
+            modulusLength: 2048,
+            privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+            publicKeyEncoding: { type: 'spki', format: 'pem' }
+        });
 
-        const [payload, signature] = response.body.token.split('.');
+        const originalKey = process.env.TOKEN_SIGNING_KEY;
 
-        expect(JSON.parse(decodeURIComponent(payload)).sub).toBe('alice');
-        // RSA-2048 signature, base64url encoded.
-        expect(signature).toMatch(/^[A-Za-z0-9_-]{342}$/);
-    });
+        beforeEach(() => {
+            process.env.TOKEN_SIGNING_KEY = privateKey;
+        });
 
-    test('GET /api/token defaults to anonymous user', async () => {
-        const response = await request(server)
-            .get('/api/token')
-            .expect(200);
+        afterAll(() => {
+            if (originalKey === undefined) {
+                delete process.env.TOKEN_SIGNING_KEY;
+            } else {
+                process.env.TOKEN_SIGNING_KEY = originalKey;
+            }
+        });
 
-        const [payload] = response.body.token.split('.');
+        const verify = (token) => {
+            const [payload, signature] = token.split('.');
 
-        expect(JSON.parse(decodeURIComponent(payload)).sub).toBe('anonymous');
+            return crypto.verify(
+                'sha256',
+                Buffer.from(payload),
+                publicKey,
+                Buffer.from(signature, 'base64url')
+            );
+        };
+
+        test('returns a token signed with the key from the environment', async () => {
+            const response = await request(server)
+                .get('/api/token')
+                .query({
+                    user: 'alice'
+                })
+                .expect(200)
+                .expect('Content-Type', /json/);
+
+            const [payload] = response.body.token.split('.');
+
+            expect(JSON.parse(decodeURIComponent(payload)).sub).toBe('alice');
+            expect(verify(response.body.token)).toBe(true);
+        });
+
+        test('defaults to anonymous user', async () => {
+            const response = await request(server)
+                .get('/api/token')
+                .expect(200);
+
+            const [payload] = response.body.token.split('.');
+
+            expect(JSON.parse(decodeURIComponent(payload)).sub).toBe('anonymous');
+        });
+
+        test('accepts a single-line key with escaped \\n', async () => {
+            process.env.TOKEN_SIGNING_KEY = privateKey.replace(/\n/g, '\\n');
+
+            const response = await request(server)
+                .get('/api/token')
+                .expect(200);
+
+            expect(verify(response.body.token)).toBe(true);
+        });
+
+        test('returns 503 without leaking details when the key is missing', async () => {
+            delete process.env.TOKEN_SIGNING_KEY;
+            jest.spyOn(console, 'error').mockImplementation(() => {});
+
+            const response = await request(server)
+                .get('/api/token')
+                .expect(503)
+                .expect('Content-Type', /json/);
+
+            expect(response.body).toEqual({
+                error: 'Token signing is not configured'
+            });
+            expect(console.error).toHaveBeenCalled();
+        });
     });
 
     test('GET /api/greeting greets the supplied name', async () => {
