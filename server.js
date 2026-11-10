@@ -51,7 +51,33 @@ function renderGreeting(name) {
     return compiled({});
 }
 
+// Entry point for every request. Some Node APIs used below throw
+// synchronously on malformed input (fs.readFile / exec reject null
+// bytes, res.writeHead rejects CR/LF in header values). Without this
+// guard one such request (e.g. ?name=a%00b) crashed the whole process,
+// a denial of service found by the Nuclei DAST scan. The intentional
+// vulnerabilities below are unchanged; only the crash is fixed.
 function requestHandler(req, res) {
+    try {
+        return handleRequest(req, res);
+    } catch (err) {
+        console.error('Rejected malformed request:', err.code || err.message);
+
+        if (res.headersSent) {
+            return res.destroy();
+        }
+
+        res.writeHead(400, {
+            'Content-Type': 'application/json'
+        });
+
+        return res.end(JSON.stringify({
+            error: 'Bad request'
+        }));
+    }
+}
+
+function handleRequest(req, res) {
     const parsedUrl = url.parse(req.url, true);
     const path = parsedUrl.pathname;
     const query = parsedUrl.query;

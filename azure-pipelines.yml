@@ -5,11 +5,16 @@ pool:
   vmImage: ubuntu-latest
 
 variables:
-  nodeVersion: '22.x'
+  nodeVersion: '26.x'          # same major as the node:26-alpine image
   mainFile: 'server.js'        # main JS file to run
   testFile: 'server.test.js'   # Jest unit test file
   imageName: 'qodana-example-nodejs'
   imageTag: '$(Build.BuildId)'
+  containerName: 'qodana-example-nodejs-smoke'
+
+  # Tools
+  nucleiVersion: '3.11.1'
+  dastFailOn: 'medium,high,critical'   # Nuclei severities that fail the build
 
 stages:
 
@@ -45,6 +50,16 @@ stages:
           - script: |
               npm ci
             displayName: 'Install dependencies'
+
+          # ====================================================
+          # VERIFY PACKAGE SIGNATURES (supply chain)
+          # Checks that every installed package carries a valid
+          # npm registry signature (and provenance attestation
+          # where published), i.e. was not tampered with.
+          # ====================================================
+          - script: |
+              npm audit signatures
+            displayName: 'Verify npm package signatures'
 
           # ====================================================
           # ESLINT
@@ -379,15 +394,24 @@ stages:
 
   # ============================================================
   # CONTAINER SECURITY
-  # Builds the Docker image and scans the image itself.
+  # Builds the Docker image once, then two jobs run in parallel
+  # on exactly that image:
+  #   - TrivyContainer: Dockerfile config, image SCA, secrets,
+  #                     container SBOM + license reports
+  #   - SmokeAndDAST:   starts the container, smoke-tests the API,
+  #                     runs Nuclei DAST against it
   # ============================================================
   - stage: ContainerSecurity
     displayName: 'Container Security'
     dependsOn: Security
 
     jobs:
-      - job: ImageScan
-        displayName: 'Build and scan Docker image'
+
+      # ========================================================
+      # BUILD CONTAINER
+      # ========================================================
+      - job: BuildContainer
+        displayName: 'Build Docker image'
         steps:
           - checkout: self
             displayName: 'Checkout repository'
@@ -400,6 +424,7 @@ stages:
           # ====================================================
           - script: |
               DOCKER_BUILDKIT=1 docker build \
+                --pull \
                 --build-arg MAIN_FILE="$(mainFile)" \
                 --build-arg TEST_FILE="$(testFile)" \
                 -t "$(imageName):$(imageTag)" \
@@ -410,7 +435,45 @@ stages:
 
           # ====================================================
           # INSTALL TRIVY
+          # Save the image so the parallel jobs below use exactly
+          # the same image (each job runs on a fresh agent).
           # ====================================================
+          - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)/docker"
+
+              docker save \
+                "$(imageName):$(imageTag)" \
+                -o "$(Build.ArtifactStagingDirectory)/docker/$(imageName).tar"
+            displayName: 'Save Docker image'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Docker image artifact'
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/docker'
+              artifact: 'docker-image'
+
+
+      # ========================================================
+      # TRIVY: DOCKERFILE + IMAGE SCA + SECRETS + SBOM
+      # ========================================================
+      - job: TrivyContainer
+        displayName: 'Trivy Container SCA + SBOM'
+        dependsOn: BuildContainer
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Docker image'
+            inputs:
+              artifact: 'docker-image'
+              path: '$(Pipeline.Workspace)/docker'
+
+          - script: |
+              docker load -i "$(Pipeline.Workspace)/docker/$(imageName).tar"
+            displayName: 'Load Docker image'
+
           - script: |
               sudo apt-get install -y wget gnupg
 
@@ -466,3 +529,248 @@ stages:
                 "$(imageName):$(imageTag)"
             displayName: 'Scan image for secrets'
             condition: succeededOrFailed()
+
+          # ====================================================
+          # CONTAINER SBOM
+          # Unlike "npm sbom" (npm packages from the source), this
+          # covers everything in the final image: Alpine OS
+          # packages, the Node.js runtime and the production
+          # node_modules.
+          # ====================================================
+          - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)/sbom"
+
+              trivy image \
+                --format cyclonedx \
+                --output "$(Build.ArtifactStagingDirectory)/sbom/$(imageName).cdx.json" \
+                "$(imageName):$(imageTag)"
+            displayName: 'Generate container SBOM'
+            condition: succeededOrFailed()
+
+          # ====================================================
+          # LICENSE REPORTS (information only, never fail)
+          # ====================================================
+          - script: |
+              trivy sbom \
+                --scanners license \
+                --pkg-types library \
+                --severity UNKNOWN,HIGH,CRITICAL \
+                "$(Build.ArtifactStagingDirectory)/sbom/$(imageName).cdx.json"
+            displayName: 'SBOM - Application (npm) license report'
+            condition: succeededOrFailed()
+
+          - script: |
+              trivy sbom \
+                --scanners license \
+                --pkg-types os \
+                --severity UNKNOWN,HIGH,CRITICAL \
+                "$(Build.ArtifactStagingDirectory)/sbom/$(imageName).cdx.json"
+            displayName: 'SBOM - Container OS license report'
+            condition: succeededOrFailed()
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish container SBOM'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/sbom'
+              artifact: 'container-sbom'
+
+
+      # ========================================================
+      # SMOKE TESTS + NUCLEI DAST ON THE RUNNING CONTAINER
+      # ========================================================
+      - job: SmokeAndDAST
+        displayName: 'Smoke tests + Nuclei DAST'
+        dependsOn: BuildContainer
+        steps:
+          - checkout: none
+
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Docker image'
+            inputs:
+              artifact: 'docker-image'
+              path: '$(Pipeline.Workspace)/docker'
+
+          - script: |
+              docker load -i "$(Pipeline.Workspace)/docker/$(imageName).tar"
+            displayName: 'Load Docker image'
+
+          # ====================================================
+          # START CONTAINER
+          # A throwaway RSA key is generated for this run only,
+          # so /api/token works without any stored secret.
+          # ====================================================
+          - script: |
+              set -e
+
+              openssl genpkey \
+                -algorithm RSA \
+                -pkeyopt rsa_keygen_bits:2048 \
+                -out "$(Agent.TempDirectory)/signing-key.pem" 2>/dev/null
+
+              docker run --detach \
+                --name "$(containerName)" \
+                --publish 8080:8080 \
+                --env TOKEN_SIGNING_KEY="$(cat "$(Agent.TempDirectory)/signing-key.pem")" \
+                "$(imageName):$(imageTag)"
+
+              rm -f "$(Agent.TempDirectory)/signing-key.pem"
+            displayName: 'Start container'
+
+          # ====================================================
+          # WAIT FOR THE DOCKERFILE HEALTHCHECK
+          # ====================================================
+          - script: |
+              echo "Waiting for container..."
+
+              for i in $(seq 1 30); do
+                STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$(containerName)" 2>/dev/null)
+                RUNNING=$(docker inspect --format='{{.State.Running}}' "$(containerName)" 2>/dev/null)
+
+                echo "Attempt $i - running: $RUNNING, health: $STATUS"
+
+                if [ "$STATUS" = "healthy" ]; then
+                  echo "Container is healthy."
+                  exit 0
+                fi
+
+                if [ "$RUNNING" != "true" ] || [ "$STATUS" = "unhealthy" ]; then
+                  echo "Container crashed or is unhealthy."
+                  docker logs "$(containerName)"
+                  exit 1
+                fi
+
+                sleep 2
+              done
+
+              echo "Container did not become healthy in time."
+              docker logs "$(containerName)"
+              exit 1
+            displayName: 'Verify Docker health check'
+
+          # ====================================================
+          # SMOKE TESTS
+          # Real HTTP calls against the real image: catches what
+          # unit tests cannot, e.g. a dependency pruned from the
+          # runtime image ("Cannot find module").
+          # ====================================================
+          - script: |
+              BASE="http://localhost:8080"
+              FAILED=0
+
+              check() {
+                # check <name> <path> <expected status> [expected body text]
+                BODY=$(curl --silent --show-error --max-time 5 \
+                  --output - --write-out '\n%{http_code}' "$BASE$2")
+                CODE=$(echo "$BODY" | tail -n 1)
+                TEXT=$(echo "$BODY" | sed '$d')
+
+                if [ "$CODE" != "$3" ]; then
+                  echo "FAIL  $1: expected HTTP $3, got $CODE"
+                  FAILED=1
+                elif [ -n "$4" ] && ! echo "$TEXT" | grep -q "$4"; then
+                  echo "FAIL  $1: response does not contain '$4'"
+                  FAILED=1
+                else
+                  echo "PASS  $1 (HTTP $CODE)"
+                fi
+              }
+
+              check 'current time'     '/api/current_time'          200 'currentTime'
+              check 'greeting'         '/api/greeting?name=Alice'   200 'Hello, Alice!'
+              check 'token'            '/api/token?user=alice'      200 'token'
+              check 'unknown endpoint' '/api/does-not-exist'        404 'Not found'
+
+              if [ "$FAILED" -ne 0 ]; then
+                echo "========== CONTAINER LOG =========="
+                docker logs "$(containerName)"
+                exit 1
+              fi
+            displayName: 'Smoke tests'
+
+          # ====================================================
+          # INSTALL NUCLEI
+          # ====================================================
+          - script: |
+              set -e
+
+              echo "Downloading Nuclei $(nucleiVersion)..."
+
+              curl -fsSL \
+                --retry 3 \
+                --connect-timeout 15 \
+                --max-time 120 \
+                -o /tmp/nuclei.zip \
+                "https://github.com/projectdiscovery/nuclei/releases/download/v$(nucleiVersion)/nuclei_$(nucleiVersion)_linux_amd64.zip"
+
+              unzip -o /tmp/nuclei.zip nuclei -d /tmp
+              sudo install /tmp/nuclei /usr/local/bin/nuclei
+
+              nuclei -version
+              nuclei -update-templates
+            displayName: 'Install Nuclei'
+            timeoutInMinutes: 5
+
+          # ====================================================
+          # DAST SECURITY SCAN
+          # Nuclei's default CVE / misconfig templates look for
+          # known products and find almost nothing on a plain
+          # Node.js http server. -dast instead fuzzes the query
+          # parameters of the URLs below (path traversal, command
+          # injection, open redirect, template injection, ...).
+          # Every finding is printed; severities listed in
+          # $(dastFailOn) fail the job. The job also fails if the
+          # scan crashed the container (a malformed request
+          # killing the server is a DoS finding, and Nuclei would
+          # otherwise just report the target as "unresponsive").
+          # ====================================================
+          - script: |
+              BASE="http://localhost:8080"
+
+              cat > "$(Agent.TempDirectory)/dast-urls.txt" <<EOF
+              $BASE/api/file?name=test.txt
+              $BASE/api/ping?host=localhost
+              $BASE/api/redirect?url=https://example.com
+              $BASE/api/greeting?name=Alice
+              $BASE/api/token?user=alice
+              EOF
+
+              nuclei \
+                -list "$(Agent.TempDirectory)/dast-urls.txt" \
+                -dast \
+                -timeout 6 \
+                -retries 1 \
+                -no-color \
+                -jsonl-export "$(Agent.TempDirectory)/nuclei-findings.jsonl"
+
+              FINDINGS="$(Agent.TempDirectory)/nuclei-findings.jsonl"
+              touch "$FINDINGS"
+
+              FAILED=0
+
+              BLOCKING=$(jq -s --arg sev "$(dastFailOn)" \
+                '($sev | split(",")) as $s | [.[] | select(.info.severity as $x | $s | index($x))] | length' \
+                "$FINDINGS")
+              echo "Findings: $(wc -l < "$FINDINGS") total, $BLOCKING with severity in [$(dastFailOn)]."
+
+              if [ "$BLOCKING" -gt 0 ]; then
+                echo "##vso[task.logissue type=error]Nuclei found $BLOCKING issue(s) with severity in [$(dastFailOn)]."
+                FAILED=1
+              fi
+
+              if [ "$(docker inspect --format='{{.State.Running}}' "$(containerName)")" != "true" ]; then
+                echo "##vso[task.logissue type=error]The container crashed during the DAST scan (denial of service)."
+                echo "========== CONTAINER LOG =========="
+                docker logs --tail 30 "$(containerName)"
+                FAILED=1
+              fi
+
+              exit $FAILED
+            displayName: 'Nuclei DAST scan'
+            timeoutInMinutes: 10
+
+          # Always clean up
+          - script: |
+              docker rm --force "$(containerName)" || true
+            displayName: 'Stop container'
+            condition: always()

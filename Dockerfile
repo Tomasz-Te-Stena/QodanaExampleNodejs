@@ -75,6 +75,11 @@ USER node
 
 EXPOSE 8080
 
+# Lets Docker (and the pipeline's smoke-test / DAST job) know when
+# the API actually answers. busybox wget ships with Alpine.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1:8080/api/current_time || exit 1
+
 # Shell form is needed to expand $MAIN_FILE; "exec" makes node PID 1
 # so it still receives SIGTERM from "docker stop" directly.
 CMD ["sh", "-c", "exec node \"$MAIN_FILE\""]

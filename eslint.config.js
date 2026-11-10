@@ -1,4 +1,5 @@
 const js = require('@eslint/js');
+const security = require('eslint-plugin-security');
 
 module.exports = [
     // ==========================================================
@@ -16,6 +17,15 @@ module.exports = [
     // ESLINT RECOMMENDED RULES
     // ==========================================================
     js.configs.recommended,
+
+    // ==========================================================
+    // SECURITY RULES (linter-level SAST, like Roslyn analyzers)
+    // Flags child_process with variable input, non-literal fs
+    // paths, unsafe RegExp, eval-like calls, ... Rules are
+    // warnings, so they show in the IDE and in the pipeline log
+    // without failing the build (Semgrep is the blocking SAST).
+    // ==========================================================
+    security.configs.recommended,
 
     // ==========================================================
     // NODE.JS APPLICATION

@@ -277,6 +277,67 @@ describe('Vulnerable REST API', () => {
         expect(response.body).toHaveProperty('error');
     });
 
+    describe('malformed input does not crash the server (DoS)', () => {
+        beforeEach(() => {
+            jest.spyOn(console, 'error').mockImplementation(() => {});
+        });
+
+        test('null byte in file name returns 400', async () => {
+            const response = await request(server)
+                .get('/api/file?name=test.txt%00x')
+                .expect(400)
+                .expect('Content-Type', /json/);
+
+            expect(response.body).toEqual({ error: 'Bad request' });
+            expect(console.error).toHaveBeenCalled();
+        });
+
+        test('null byte in ping host returns 400', async () => {
+            // The real exec throws synchronously on null bytes.
+            exec.mockImplementation(() => {
+                const err = new TypeError('command must not contain null bytes');
+                err.code = 'ERR_INVALID_ARG_VALUE';
+                throw err;
+            });
+
+            const response = await request(server)
+                .get('/api/ping?host=localhost%00x')
+                .expect(400);
+
+            expect(response.body).toEqual({ error: 'Bad request' });
+        });
+
+        test('CRLF in redirect URL returns 400 (no header injection)', async () => {
+            const response = await request(server)
+                .get('/api/redirect?url=https://example.com%0D%0ASet-Cookie:x=1')
+                .expect(400);
+
+            expect(response.headers['set-cookie']).toBeUndefined();
+            expect(response.body).toEqual({ error: 'Bad request' });
+        });
+
+        test('server keeps answering after a malformed request', async () => {
+            await request(server).get('/api/file?name=%00').expect(400);
+            await request(server).get('/api/current_time').expect(200);
+        });
+
+        test('destroys the socket if headers were already sent', () => {
+            const res = {
+                headersSent: true,
+                destroy: jest.fn(),
+                writeHead: jest.fn()
+            };
+            const req = { method: 'GET', url: '/api/current_time' };
+
+            // Force a throw after "headers were sent".
+            res.end = () => { throw new Error('boom'); };
+
+            requestHandler(req, res);
+
+            expect(res.destroy).toHaveBeenCalled();
+        });
+    });
+
     test('unknown endpoint returns 404', async () => {
         const response = await request(server)
             .get('/api/does-not-exist')
