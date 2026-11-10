@@ -10,7 +10,6 @@ variables:
   testFile: 'server.test.js'   # Jest unit test file
   imageName: 'qodana-example-nodejs'
   imageTag: '$(Build.BuildId)'
-  renovateVersion: '44.225.1'  # pinned Renovate CLI version
 
 stages:
 
@@ -467,46 +466,3 @@ stages:
                 "$(imageName):$(imageTag)"
             displayName: 'Scan image for secrets'
             condition: succeededOrFailed()
-
-
-  # ============================================================
-  # DEPENDENCY UPDATES (RENOVATE)
-  # Opens one pull request per outdated dependency, using the
-  # rules in renovate.json. Each PR then goes through this
-  # pipeline (build, tests, security, image scan) as PR validation.
-  #
-  # Runs only for builds of main (never for PR / Renovate branch
-  # builds), and also when an earlier stage failed: an update PR
-  # may be exactly what fixes a failing vulnerability scan.
-  #
-  # Needs the "<Project> Build Service (<org>)" identity to have
-  # Contribute, Create branch and Contribute to pull requests on
-  # this repository.
-  # ============================================================
-  - stage: Renovate
-    displayName: 'Dependency updates (Renovate)'
-    dependsOn: ContainerSecurity
-    condition: and(not(canceled()), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
-
-    jobs:
-      - job: Renovate
-        displayName: 'Run Renovate'
-        steps:
-          # Renovate clones the repository itself.
-          - checkout: none
-
-          # Renovate requires Node.js 24.11+ (independent of nodeVersion).
-          - task: UseNode@1
-            displayName: 'Install Node.js 24.x for Renovate'
-            inputs:
-              version: '24.x'
-
-          - script: |
-              npx --yes renovate@$(renovateVersion)
-            displayName: 'Run Renovate $(renovateVersion)'
-            env:
-              RENOVATE_PLATFORM: azure
-              RENOVATE_ENDPOINT: $(System.CollectionUri)
-              RENOVATE_TOKEN: $(System.AccessToken)
-              RENOVATE_REPOSITORIES: $(System.TeamProject)/$(Build.Repository.Name)
-              LOG_LEVEL: info

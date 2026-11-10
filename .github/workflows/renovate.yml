@@ -1,0 +1,56 @@
+# ============================================================
+# RENOVATE - DEPENDENCY UPDATES
+# Checks package.json (and the Dockerfile base image) against the
+# public registries and opens one pull request per update, using
+# the rules in renovate.json.
+#
+# Each PR is then built and tested by the Azure Pipeline
+# (azure-pipelines.yml) as normal PR validation.
+#
+# Uses the built-in GITHUB_TOKEN, so no secret is needed. One-time
+# repository setting required:
+#   Settings > Actions > General > Workflow permissions >
+#   tick "Allow GitHub Actions to create and approve pull requests"
+# ============================================================
+name: Renovate
+
+on:
+  schedule:
+    # GitHub cron is always UTC. 08:30 UTC = 09:30 CET (winter);
+    # during summer time (CEST) this runs at 10:30 local.
+    - cron: '30 8 * * 1-5'  # Monday-Friday 08:30 UTC
+  workflow_dispatch:         # "Run workflow" button in the Actions tab
+    inputs:
+      logLevel:
+        description: 'Renovate log level'
+        type: choice
+        options: [info, debug]
+        default: info
+
+# Only one Renovate run at a time.
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # push renovate/* branches
+  pull-requests: write   # open / update PRs
+  issues: write          # "Dependency Dashboard" issue
+
+jobs:
+  renovate:
+    name: Run Renovate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # Pinned to a commit SHA (v46.3.13) so the action cannot change
+      # underneath us; Renovate itself is pinned via renovate-version.
+      - name: Renovate
+        uses: renovatebot/github-action@266fef21329c44765ad42f9dea1f01f5d2d91084 # v46.3.13
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          renovate-version: '44.225.1'
+        env:
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
+          LOG_LEVEL: ${{ inputs.logLevel || 'info' }}

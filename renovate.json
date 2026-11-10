@@ -1,6 +1,10 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Runs from .github/workflows/renovate.yml with the built-in GITHUB_TOKEN, which may not modify workflow files, so GitHub Actions updates are disabled.",
   "extends": ["config:recommended"],
   "labels": ["dependencies"],
-  "prConcurrentLimit": 5
+  "prConcurrentLimit": 5,
+  "github-actions": {
+    "enabled": false
+  }
 }
