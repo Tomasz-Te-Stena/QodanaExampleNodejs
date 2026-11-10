@@ -37,6 +37,11 @@ COPY eslint.config.js ./
 RUN npm run lint
 RUN npm test -- --collectCoverageFrom="${MAIN_FILE}" --runTestsByPath "${TEST_FILE}"
 
+# Keep only production dependencies for the runtime image
+# (prune leaves empty @scope folders behind, so remove those too).
+RUN npm prune --omit=dev \
+    && find node_modules -mindepth 1 -type d -empty -delete
+
 
 # ============================================================
 # STAGE 2 - RUNTIME
@@ -47,8 +52,9 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-# The app runs with plain "node <MAIN_FILE>" and has no runtime
-# dependencies, so npm/npx/corepack are not needed at runtime.
+# The app runs with plain "node <MAIN_FILE>" (its production
+# node_modules are copied from the build stage below), so the
+# global npm/npx/corepack are not needed at runtime.
 # Removing them drops their bundled packages (and their CVEs,
 # e.g. in undici and brace-expansion) from the final image.
 RUN rm -rf /usr/local/lib/node_modules \
@@ -62,6 +68,7 @@ RUN rm -rf /usr/local/lib/node_modules \
 ARG MAIN_FILE=server.js
 ENV MAIN_FILE=${MAIN_FILE}
 
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/${MAIN_FILE} ./${MAIN_FILE}
 
 USER node

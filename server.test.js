@@ -147,6 +147,76 @@ describe('Vulnerable REST API', () => {
             .expect('Content-Type', /json/);
     });
 
+    test('GET /api/token returns a signed token for the user', async () => {
+        const response = await request(server)
+            .get('/api/token')
+            .query({
+                user: 'alice'
+            })
+            .expect(200)
+            .expect('Content-Type', /json/);
+
+        const [payload, signature] = response.body.token.split('.');
+
+        expect(JSON.parse(decodeURIComponent(payload)).sub).toBe('alice');
+        // RSA-2048 signature, base64url encoded.
+        expect(signature).toMatch(/^[A-Za-z0-9_-]{342}$/);
+    });
+
+    test('GET /api/token defaults to anonymous user', async () => {
+        const response = await request(server)
+            .get('/api/token')
+            .expect(200);
+
+        const [payload] = response.body.token.split('.');
+
+        expect(JSON.parse(decodeURIComponent(payload)).sub).toBe('anonymous');
+    });
+
+    test('GET /api/greeting greets the supplied name', async () => {
+        const response = await request(server)
+            .get('/api/greeting')
+            .query({
+                name: 'Alice'
+            })
+            .expect(200)
+            .expect('Content-Type', /text\/plain/);
+
+        expect(response.text).toBe('Hello, Alice!');
+    });
+
+    test('GET /api/greeting defaults to stranger', async () => {
+        const response = await request(server)
+            .get('/api/greeting')
+            .expect(200);
+
+        expect(response.text).toBe('Hello, stranger!');
+    });
+
+    test('GET /api/greeting evaluates template code in name (template injection)', async () => {
+        const response = await request(server)
+            .get('/api/greeting')
+            .query({
+                name: '<%= 7 * 7 %>'
+            })
+            .expect(200);
+
+        // Documents the intentional vulnerability: input is executed.
+        expect(response.text).toBe('Hello, 49!');
+    });
+
+    test('GET /api/greeting returns 400 for an invalid template', async () => {
+        const response = await request(server)
+            .get('/api/greeting')
+            .query({
+                name: '<%= ) %>'
+            })
+            .expect(400)
+            .expect('Content-Type', /json/);
+
+        expect(response.body).toHaveProperty('error');
+    });
+
     test('unknown endpoint returns 404', async () => {
         const response = await request(server)
             .get('/api/does-not-exist')
