@@ -25,10 +25,10 @@ stages:
           # ====================================================
           # INSTALL NODE.JS
           # ====================================================
-          - task: NodeTool@0
+          - task: UseNode@1
             displayName: 'Install Node.js $(nodeVersion)'
             inputs:
-              versionSpec: '$(nodeVersion)'
+              version: '$(nodeVersion)'
 
           - script: |
               node --version
@@ -72,10 +72,10 @@ stages:
             displayName: 'Checkout repository'
             clean: true
 
-          - task: NodeTool@0
+          - task: UseNode@1
             displayName: 'Install Node.js $(nodeVersion)'
             inputs:
-              versionSpec: '$(nodeVersion)'
+              version: '$(nodeVersion)'
 
           - script: |
               npm ci
@@ -148,10 +148,10 @@ stages:
             displayName: 'Checkout repository'
             clean: true
 
-          - task: NodeTool@0
+          - task: UseNode@1
             displayName: 'Install Node.js $(nodeVersion)'
             inputs:
-              versionSpec: '$(nodeVersion)'
+              version: '$(nodeVersion)'
 
           # Install dependencies so package-lock/node_modules
           # are available for analysis.
@@ -230,10 +230,10 @@ stages:
             clean: true
             persistCredentials: true
 
-          - task: NodeTool@0
+          - task: UseNode@1
             displayName: 'Install Node.js $(nodeVersion)'
             inputs:
-              versionSpec: '$(nodeVersion)'
+              version: '$(nodeVersion)'
 
           - script: |
               npm ci
