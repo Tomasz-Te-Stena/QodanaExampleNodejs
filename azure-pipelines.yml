@@ -247,6 +247,49 @@ stages:
 
 
       # ========================================================
+      # SBOM (Software Bill of Materials)
+      # ========================================================
+      - job: SBOM
+        displayName: 'Generate SBOM'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: UseNode@1
+            displayName: 'Install Node.js $(nodeVersion)'
+            inputs:
+              version: '$(nodeVersion)'
+
+          # npm sbom reads the installed tree, so install first.
+          - script: |
+              npm ci
+            displayName: 'Install dependencies'
+
+          # Built into npm 10.1+, nothing extra to install.
+          # CycloneDX JSON, all dependencies (prod + dev).
+          - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)/sbom"
+
+              npm sbom \
+                --sbom-format cyclonedx \
+                --sbom-type application \
+                > "$(Build.ArtifactStagingDirectory)/sbom/sbom.cdx.json"
+
+              node -e "
+                const s = require('$(Build.ArtifactStagingDirectory)/sbom/sbom.cdx.json');
+                console.log('CycloneDX ' + s.specVersion + ', ' + s.components.length + ' components');
+              "
+            displayName: 'Generate CycloneDX SBOM'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SBOM artifact'
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/sbom'
+              artifact: 'sbom'
+
+
+      # ========================================================
       # QODANA SAST
       # ========================================================
       - job: Qodana
