@@ -1,6 +1,6 @@
 const http = require('http');
 const fs = require('fs');
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const url = require('url');
 const crypto = require('crypto');
 const { Buffer } = require('buffer');
@@ -58,8 +58,15 @@ function isSafeRedirect(target) {
     return typeof target === 'string' && /^\/(?![/\\])/.test(target);
 }
 
+// Hostname, IPv4 or IPv6 address only: letters, digits, ".", "-"
+// and ":" (no spaces or shell characters), max 253 characters,
+// and it must not start with "-" (would look like an option).
+function isValidHost(host) {
+    return typeof host === 'string' && /^[A-Za-z0-9.:][A-Za-z0-9.:-]{0,252}$/.test(host);
+}
+
 // Entry point for every request. Some Node APIs used below throw
-// synchronously on malformed input (fs.readFile / exec reject null
+// synchronously on malformed input (fs.readFile rejects null
 // bytes, res.writeHead rejects CR/LF in header values). Without this
 // guard one such request (e.g. ?name=a%00b) crashed the whole process,
 // a denial of service found by the Nuclei DAST scan. The intentional
@@ -132,8 +139,21 @@ function handleRequest(req, res) {
     if (req.method === 'GET' && path === '/api/ping') {
         const host = query.host;
 
-        // SECURITY ERROR #4: Command injection
-        exec('ping -c 1 ' + host, (error, stdout, stderr) => {
+        if (!isValidHost(host)) {
+            res.writeHead(400, {
+                'Content-Type': 'application/json'
+            });
+
+            return res.end(JSON.stringify({
+                error: 'Invalid host'
+            }));
+        }
+
+        // FIXED (was SECURITY ERROR #4: command injection).
+        // execFile runs ping directly, without a shell, and the host
+        // is a separate argument, so ";", "|", "$(...)" etc. are never
+        // interpreted. "--" stops a host being read as a ping option.
+        execFile('ping', ['-c', '1', '--', host], (error, stdout, stderr) => {
             res.writeHead(200, {
                 'Content-Type': 'text/plain'
             });

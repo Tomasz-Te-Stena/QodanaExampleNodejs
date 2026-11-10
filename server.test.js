@@ -1,8 +1,8 @@
-// server.js destructures exec at load time, so it must be mocked
+// server.js destructures execFile at load time, so it must be mocked
 // before server.js is required. No real shell command ever runs.
 jest.mock('child_process', () => ({
     ...jest.requireActual('child_process'),
-    exec: jest.fn()
+    execFile: jest.fn()
 }));
 
 const request = require('supertest');
@@ -10,7 +10,7 @@ const http = require('http');
 const fs = require('fs');
 const crypto = require('crypto');
 const { Buffer } = require('buffer');
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 
 const { requestHandler } = require('./server');
 
@@ -20,7 +20,7 @@ describe('Vulnerable REST API', () => {
 
     afterEach(() => {
         jest.restoreAllMocks();
-        exec.mockReset();
+        execFile.mockReset();
     });
 
     test('GET /api/current_time returns current time', async () => {
@@ -131,7 +131,7 @@ describe('Vulnerable REST API', () => {
     });
 
     test('GET /api/ping returns combined stdout and stderr', async () => {
-        exec.mockImplementation((command, callback) => {
+        execFile.mockImplementation((file, args, callback) => {
             callback(null, 'PING localhost ok\n', 'some warning\n');
         });
 
@@ -144,29 +144,55 @@ describe('Vulnerable REST API', () => {
             .expect('Content-Type', /text\/plain/);
 
         expect(response.text).toBe('PING localhost ok\nsome warning\n');
-        expect(exec).toHaveBeenCalledWith(
-            'ping -c 1 localhost',
+
+        // No shell: ping is run directly, host is a separate argument.
+        expect(execFile).toHaveBeenCalledWith(
+            'ping',
+            ['-c', '1', '--', 'localhost'],
             expect.any(Function)
         );
     });
 
-    test('GET /api/ping passes host unsanitised to the shell (command injection)', async () => {
-        exec.mockImplementation((command, callback) => {
-            callback(null, '', '');
+    test.each([
+        'example.com',
+        '192.168.1.10',
+        '::1',
+        'my-host.internal'
+    ])('GET /api/ping accepts host %s', async (host) => {
+        execFile.mockImplementation((file, args, callback) => {
+            callback(null, 'ok', '');
         });
 
         await request(server)
             .get('/api/ping')
-            .query({
-                host: 'localhost; cat /etc/passwd'
-            })
+            .query({ host })
             .expect(200);
 
-        // Documents the intentional vulnerability: input reaches exec as-is.
-        expect(exec).toHaveBeenCalledWith(
-            'ping -c 1 localhost; cat /etc/passwd',
+        expect(execFile).toHaveBeenCalledWith(
+            'ping',
+            ['-c', '1', '--', host],
             expect.any(Function)
         );
+    });
+
+    test.each([
+        ['shell separator', 'localhost; cat /etc/passwd'],
+        ['pipe', '|nslookup attacker.example'],
+        ['command substitution', '$(id)'],
+        ['backticks', '`id`'],
+        ['space / extra argument', 'localhost -f'],
+        ['option injection', '-f'],
+        ['missing host', undefined],
+        ['too long', 'a'.repeat(254)]
+    ])('GET /api/ping rejects %s (no command injection)', async (_name, host) => {
+        const response = await request(server)
+            .get('/api/ping')
+            .query(host === undefined ? {} : { host })
+            .expect(400)
+            .expect('Content-Type', /json/);
+
+        expect(response.body).toEqual({ error: 'Invalid host' });
+        expect(execFile).not.toHaveBeenCalled();
     });
 
     test('non-GET request to a known path returns 404', async () => {
@@ -331,18 +357,12 @@ describe('Vulnerable REST API', () => {
         });
 
         test('null byte in ping host returns 400', async () => {
-            // The real exec throws synchronously on null bytes.
-            exec.mockImplementation(() => {
-                const err = new TypeError('command must not contain null bytes');
-                err.code = 'ERR_INVALID_ARG_VALUE';
-                throw err;
-            });
-
             const response = await request(server)
                 .get('/api/ping?host=localhost%00x')
                 .expect(400);
 
-            expect(response.body).toEqual({ error: 'Bad request' });
+            expect(response.body).toEqual({ error: 'Invalid host' });
+            expect(execFile).not.toHaveBeenCalled();
         });
 
         test('CRLF in redirect URL returns 400 (no header injection)', async () => {
