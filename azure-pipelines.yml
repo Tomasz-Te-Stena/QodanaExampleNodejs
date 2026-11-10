@@ -220,6 +220,33 @@ stages:
 
 
       # ========================================================
+      # DEPENDENCY FRESHNESS (information only, never fails)
+      # ========================================================
+      - job: DependencyCheck
+        displayName: 'Newer dependency versions'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: UseNode@1
+            displayName: 'Install Node.js $(nodeVersion)'
+            inputs:
+              version: '$(nodeVersion)'
+
+          - script: |
+              npm ci
+            displayName: 'Install dependencies'
+
+          # Prints Current / Wanted / Latest for every package that
+          # has a newer version on npm. npm outdated exits 1 when it
+          # finds any, so "|| true" keeps the step green.
+          - script: |
+              npm outdated --long || true
+            displayName: 'List newer dependency versions'
+
+
+      # ========================================================
       # QODANA SAST
       # ========================================================
       - job: Qodana
