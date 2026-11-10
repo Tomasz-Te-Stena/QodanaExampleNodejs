@@ -1,7 +1,7 @@
 # ============================================================
 # STAGE 1 - BUILD AND TEST
 # ============================================================
-FROM node:24-alpine AS build
+FROM node:26-alpine AS build
 
 WORKDIR /app
 
@@ -41,7 +41,7 @@ RUN npm test -- --collectCoverageFrom="${MAIN_FILE}" --runTestsByPath "${TEST_FI
 # ============================================================
 # STAGE 2 - RUNTIME
 # ============================================================
-FROM node:24-alpine AS runner
+FROM node:26-alpine AS runner
 
 WORKDIR /app
 
