@@ -6,6 +6,10 @@ pool:
 
 variables:
   nodeVersion: '22.x'
+  mainFile: 'server.js'        # main JS file to run
+  testFile: 'server.test.js'   # Jest unit test file
+  imageName: 'qodana-example-nodejs'
+  imageTag: '$(Build.BuildId)'
 
 stages:
 
@@ -53,7 +57,8 @@ stages:
           # VALIDATE JAVASCRIPT SYNTAX
           # ====================================================
           - script: |
-              node --check server.js
+              node --check "$(mainFile)"
+              node --check "$(testFile)"
             displayName: 'Validate JavaScript syntax'
 
 
@@ -88,9 +93,13 @@ stages:
               mkdir -p "$(Agent.TempDirectory)/TestResults"
               mkdir -p "$(Agent.TempDirectory)/Coverage"
 
+              # Runs only the selected test file and measures coverage
+              # of the selected main file (overrides package.json).
               npx jest \
                 --ci \
                 --coverage \
+                --collectCoverageFrom="$(mainFile)" \
+                --runTestsByPath "$(testFile)" \
                 --reporters=default \
                 --reporters=jest-junit
             displayName: 'Unit tests with coverage'
@@ -366,3 +375,94 @@ stages:
                 --error \
                 .
             displayName: 'Run Semgrep SAST'
+
+
+  # ============================================================
+  # CONTAINER SECURITY
+  # Builds the Docker image and scans the image itself.
+  # ============================================================
+  - stage: ContainerSecurity
+    displayName: 'Container Security'
+    dependsOn: Security
+
+    jobs:
+      - job: ImageScan
+        displayName: 'Build and scan Docker image'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          # ====================================================
+          # BUILD IMAGE
+          # The Dockerfile runs lint + unit tests in its build
+          # stage, so a broken build or failing test stops here.
+          # ====================================================
+          - script: |
+              DOCKER_BUILDKIT=1 docker build \
+                --build-arg MAIN_FILE="$(mainFile)" \
+                --build-arg TEST_FILE="$(testFile)" \
+                -t "$(imageName):$(imageTag)" \
+                .
+
+              docker image ls "$(imageName)"
+            displayName: 'Build Docker image'
+
+          # ====================================================
+          # INSTALL TRIVY
+          # ====================================================
+          - script: |
+              sudo apt-get install -y wget gnupg
+
+              wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+                | gpg --dearmor \
+                | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+
+              echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+                | sudo tee /etc/apt/sources.list.d/trivy.list
+
+              sudo apt-get update
+              sudo apt-get install -y trivy
+
+              trivy --version
+            displayName: 'Install Trivy'
+
+          # ====================================================
+          # SAST FOR CONTAINERS: DOCKERFILE MISCONFIGURATION
+          # Static analysis of the Dockerfile (running as root,
+          # missing USER, unpinned images, secrets in ENV, ...).
+          # ====================================================
+          - script: |
+              trivy config \
+                --severity HIGH,CRITICAL \
+                --exit-code 1 \
+                Dockerfile
+            displayName: 'Scan Dockerfile (misconfiguration)'
+
+          # ====================================================
+          # SCA: VULNERABILITIES IN THE IMAGE
+          # OS packages (Alpine) + Node.js packages inside the
+          # final image. --ignore-unfixed skips CVEs that have no
+          # fix available yet, so the build only fails on what
+          # can actually be acted on.
+          # ====================================================
+          - script: |
+              trivy image \
+                --scanners vuln \
+                --severity HIGH,CRITICAL \
+                --ignore-unfixed \
+                --exit-code 1 \
+                "$(imageName):$(imageTag)"
+            displayName: 'Scan image vulnerabilities (SCA)'
+            condition: succeededOrFailed()
+
+          # ====================================================
+          # SECRETS BAKED INTO IMAGE LAYERS
+          # ====================================================
+          - script: |
+              trivy image \
+                --scanners secret \
+                --exit-code 1 \
+                "$(imageName):$(imageTag)"
+            displayName: 'Scan image for secrets'
+            condition: succeededOrFailed()
