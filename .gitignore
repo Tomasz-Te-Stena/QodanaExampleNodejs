@@ -147,3 +147,6 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Corporate TLS-inspection CA (exported locally, needed only for Docker builds behind the proxy)
+corporate-ca.crt

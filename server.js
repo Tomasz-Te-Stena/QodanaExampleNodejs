@@ -14,14 +14,14 @@ function requestHandler(req, res) {
     const path = parsedUrl.pathname;
     const query = parsedUrl.query;
 
-    // GET /api/hello
-    if (req.method === 'GET' && path === '/api/hello') {
+    // GET /api/current_time
+    if (req.method === 'GET' && path === '/api/current_time') {
         res.writeHead(200, {
             'Content-Type': 'application/json'
         });
 
         return res.end(JSON.stringify({
-            message: 'Hello World!'
+            currentTime: new Date().toISOString()
         }));
     }
 

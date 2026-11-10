@@ -7,15 +7,26 @@ describe('Vulnerable REST API', () => {
 
     const server = http.createServer(requestHandler);
 
-    test('GET /api/hello returns Hello World', async () => {
+    test('GET /api/current_time returns current time', async () => {
+        const beforeRequest = Date.now();
+
         const response = await request(server)
-            .get('/api/hello')
+            .get('/api/current_time')
             .expect(200)
             .expect('Content-Type', /json/);
 
-        expect(response.body).toEqual({
-            message: 'Hello World!'
-        });
+        const afterRequest = Date.now();
+
+        expect(response.body).toHaveProperty('currentTime');
+
+        const returnedTime = Date.parse(response.body.currentTime);
+
+        // Verify it is a valid ISO date/time.
+        expect(returnedTime).not.toBeNaN();
+
+        // Verify the returned timestamp was generated during this request.
+        expect(returnedTime).toBeGreaterThanOrEqual(beforeRequest);
+        expect(returnedTime).toBeLessThanOrEqual(afterRequest);
     });
 
     test('GET /api/admin returns admin information', async () => {
