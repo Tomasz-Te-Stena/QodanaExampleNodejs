@@ -1,11 +1,25 @@
+// server.js destructures exec at load time, so it must be mocked
+// before server.js is required. No real shell command ever runs.
+jest.mock('child_process', () => ({
+    ...jest.requireActual('child_process'),
+    exec: jest.fn()
+}));
+
 const request = require('supertest');
 const http = require('http');
+const fs = require('fs');
+const { exec } = require('child_process');
 
 const { requestHandler } = require('./server');
 
 describe('Vulnerable REST API', () => {
 
     const server = http.createServer(requestHandler);
+
+    afterEach(() => {
+        jest.restoreAllMocks();
+        exec.mockReset();
+    });
 
     test('GET /api/current_time returns current time', async () => {
         const beforeRequest = Date.now();
@@ -63,6 +77,74 @@ describe('Vulnerable REST API', () => {
 
         expect(response.body).toHaveProperty('error');
         expect(response.body).toHaveProperty('stack');
+    });
+
+    test('GET /api/file returns file contents as plain text', async () => {
+        const readFileSpy = jest.spyOn(fs, 'readFile')
+            .mockImplementation((path, encoding, callback) => {
+                callback(null, 'hello from file');
+            });
+
+        const response = await request(server)
+            .get('/api/file')
+            .query({
+                name: 'test.txt'
+            })
+            .expect(200)
+            .expect('Content-Type', /text\/plain/);
+
+        expect(response.text).toBe('hello from file');
+        expect(readFileSpy).toHaveBeenCalledWith(
+            './files/test.txt',
+            'utf8',
+            expect.any(Function)
+        );
+    });
+
+    test('GET /api/ping returns combined stdout and stderr', async () => {
+        exec.mockImplementation((command, callback) => {
+            callback(null, 'PING localhost ok\n', 'some warning\n');
+        });
+
+        const response = await request(server)
+            .get('/api/ping')
+            .query({
+                host: 'localhost'
+            })
+            .expect(200)
+            .expect('Content-Type', /text\/plain/);
+
+        expect(response.text).toBe('PING localhost ok\nsome warning\n');
+        expect(exec).toHaveBeenCalledWith(
+            'ping -c 1 localhost',
+            expect.any(Function)
+        );
+    });
+
+    test('GET /api/ping passes host unsanitised to the shell (command injection)', async () => {
+        exec.mockImplementation((command, callback) => {
+            callback(null, '', '');
+        });
+
+        await request(server)
+            .get('/api/ping')
+            .query({
+                host: 'localhost; cat /etc/passwd'
+            })
+            .expect(200);
+
+        // Documents the intentional vulnerability: input reaches exec as-is.
+        expect(exec).toHaveBeenCalledWith(
+            'ping -c 1 localhost; cat /etc/passwd',
+            expect.any(Function)
+        );
+    });
+
+    test('non-GET request to a known path returns 404', async () => {
+        await request(server)
+            .post('/api/admin')
+            .expect(404)
+            .expect('Content-Type', /json/);
     });
 
     test('unknown endpoint returns 404', async () => {
