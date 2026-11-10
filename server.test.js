@@ -56,16 +56,43 @@ describe('Vulnerable REST API', () => {
             .toBe('super-secret-production-key-12345');
     });
 
-    test('GET /api/redirect redirects to supplied URL', async () => {
+    test('GET /api/redirect redirects to a local path', async () => {
         const response = await request(server)
             .get('/api/redirect')
             .query({
-                url: 'https://example.com'
+                url: '/api/current_time'
             })
             .expect(302);
 
         expect(response.headers.location)
-            .toBe('https://example.com');
+            .toBe('/api/current_time');
+    });
+
+    test.each([
+        ['absolute URL', 'https://evil.example'],
+        ['protocol-relative URL', '//evil.example'],
+        ['backslash trick', '/\\evil.example'],
+        ['javascript: URL', 'javascript:alert(1)'],
+        ['relative path without leading slash', 'evil.example']
+    ])('GET /api/redirect rejects %s (no open redirect)', async (_name, target) => {
+        const response = await request(server)
+            .get('/api/redirect')
+            .query({
+                url: target
+            })
+            .expect(400)
+            .expect('Content-Type', /json/);
+
+        expect(response.headers.location).toBeUndefined();
+        expect(response.body).toEqual({
+            error: 'Only local redirect targets are allowed'
+        });
+    });
+
+    test('GET /api/redirect without url returns 400', async () => {
+        await request(server)
+            .get('/api/redirect')
+            .expect(400);
     });
 
     test('GET /api/file returns 500 for missing file', async () => {
@@ -253,7 +280,7 @@ describe('Vulnerable REST API', () => {
         expect(response.text).toBe('Hello, stranger!');
     });
 
-    test('GET /api/greeting evaluates template code in name (template injection)', async () => {
+    test('GET /api/greeting does not execute template code in name', async () => {
         const response = await request(server)
             .get('/api/greeting')
             .query({
@@ -261,20 +288,31 @@ describe('Vulnerable REST API', () => {
             })
             .expect(200);
 
-        // Documents the intentional vulnerability: input is executed.
-        expect(response.text).toBe('Hello, 49!');
+        // Printed (escaped) as text, never evaluated.
+        expect(response.text).toBe('Hello, &lt;%= 7 * 7 %&gt;!');
     });
 
-    test('GET /api/greeting returns 400 for an invalid template', async () => {
+    test('GET /api/greeting does not run injected code (no RCE)', async () => {
+        const response = await request(server)
+            .get('/api/greeting')
+            .query({
+                name: '<% global.pwned = true %>${process.exit(1)}'
+            })
+            .expect(200);
+
+        expect(global.pwned).toBeUndefined();
+        expect(response.text).toContain('${process.exit(1)}');
+    });
+
+    test('GET /api/greeting handles input that is not a valid template', async () => {
         const response = await request(server)
             .get('/api/greeting')
             .query({
                 name: '<%= ) %>'
             })
-            .expect(400)
-            .expect('Content-Type', /json/);
+            .expect(200);
 
-        expect(response.body).toHaveProperty('error');
+        expect(response.text).toBe('Hello, &lt;%= ) %&gt;!');
     });
 
     describe('malformed input does not crash the server (DoS)', () => {
@@ -309,7 +347,7 @@ describe('Vulnerable REST API', () => {
 
         test('CRLF in redirect URL returns 400 (no header injection)', async () => {
             const response = await request(server)
-                .get('/api/redirect?url=https://example.com%0D%0ASet-Cookie:x=1')
+                .get('/api/redirect?url=/home%0D%0ASet-Cookie:x=1')
                 .expect(400);
 
             expect(response.headers['set-cookie']).toBeUndefined();

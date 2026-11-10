@@ -730,7 +730,7 @@ stages:
               cat > "$(Agent.TempDirectory)/dast-urls.txt" <<EOF
               $BASE/api/file?name=test.txt
               $BASE/api/ping?host=localhost
-              $BASE/api/redirect?url=https://example.com
+              $BASE/api/redirect?url=/api/current_time
               $BASE/api/greeting?name=Alice
               $BASE/api/token?user=alice
               EOF

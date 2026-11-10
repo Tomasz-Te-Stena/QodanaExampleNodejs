@@ -5,10 +5,8 @@ const url = require('url');
 const crypto = require('crypto');
 const { Buffer } = require('buffer');
 
-// SECURITY ERROR #8: Vulnerable dependency.
-// lodash 4.17.20 is pinned on purpose: CVE-2021-23337 (HIGH),
-// command injection via _.template. Fixed in 4.17.21.
-// Detected by: Trivy SCA (trivy fs / trivy image --scanners vuln).
+// FIXED (was SECURITY ERROR #8: lodash 4.17.20, CVE-2021-23337).
+// lodash is now ^4.18.1; Trivy SCA (trivy fs / trivy image) checks it.
 const _ = require('lodash');
 
 // INTENTIONALLY INSECURE CODE.
@@ -43,12 +41,21 @@ function signToken(username) {
     return encoded + '.' + signature;
 }
 
-// Renders a greeting with lodash.template.
+// FIXED (was SECURITY ERROR #9: template injection / RCE).
+// The template is a constant, compiled once. User input is only
+// passed in as data and escaped by "<%- %>", so "<%= ... %>" in the
+// name is printed as text instead of being executed.
+const greetingTemplate = _.template('Hello, <%- name %>!');
+
 function renderGreeting(name) {
-    // SECURITY ERROR #9: Template injection - user input is compiled
-    // as a lodash template, so "<%= ... %>" in the name runs code.
-    const compiled = _.template('Hello, ' + name + '!');
-    return compiled({});
+    return greetingTemplate({ name: String(name) });
+}
+
+// FIXED (was SECURITY ERROR #6: open redirect).
+// Only local paths are allowed: "/something", but not "//host" or
+// "/\host", which browsers treat as a different site.
+function isSafeRedirect(target) {
+    return typeof target === 'string' && /^\/(?![/\\])/.test(target);
 }
 
 // Entry point for every request. Some Node APIs used below throw
@@ -180,28 +187,27 @@ function handleRequest(req, res) {
 
     // GET /api/greeting?name=Alice
     if (req.method === 'GET' && path === '/api/greeting') {
-        try {
-            const text = renderGreeting(query.name || 'stranger');
+        const text = renderGreeting(query.name || 'stranger');
 
-            res.writeHead(200, {
-                'Content-Type': 'text/plain'
-            });
+        res.writeHead(200, {
+            'Content-Type': 'text/plain'
+        });
 
-            return res.end(text);
-        } catch (err) {
+        return res.end(text);
+    }
+
+    // GET /api/redirect?url=/api/current_time
+    if (req.method === 'GET' && path === '/api/redirect') {
+        if (!isSafeRedirect(query.url)) {
             res.writeHead(400, {
                 'Content-Type': 'application/json'
             });
 
             return res.end(JSON.stringify({
-                error: err.message
+                error: 'Only local redirect targets are allowed'
             }));
         }
-    }
 
-    // GET /api/redirect?url=https://example.com
-    if (req.method === 'GET' && path === '/api/redirect') {
-        // SECURITY ERROR #6: Open redirect
         res.writeHead(302, {
             Location: query.url
         });
