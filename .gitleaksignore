@@ -1,0 +1,8 @@
+# Gitleaks baseline: known findings in git history that are accepted.
+# Format: <commit>:<file>:<rule>:<line> (the "Fingerprint" Gitleaks prints).
+# Every entry must say why it is accepted. New secrets still fail the build.
+
+# Throwaway demo RSA key (old SECURITY ERROR #7), removed from server.js in
+# 95d8eda and replaced by the TOKEN_SIGNING_KEY environment variable.
+# It was never used anywhere real. A real key here would have to be rotated.
+0deb95234642511f2385df4d734b1d12d748fbf6:server.js:private-key:23

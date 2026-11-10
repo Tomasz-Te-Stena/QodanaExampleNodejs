@@ -1,0 +1,127 @@
+openapi: 3.0.3
+info:
+  title: Vulnerable REST API
+  description: >
+    Intentionally vulnerable Node.js API for security pipeline testing.
+    Used by the OWASP ZAP API scan in azure-pipelines.yml, so ZAP knows
+    every endpoint and parameter to attack.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080
+paths:
+  /api/current_time:
+    get:
+      summary: Current server time
+      responses:
+        '200':
+          description: ISO timestamp
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  currentTime:
+                    type: string
+                    format: date-time
+  /api/file:
+    get:
+      summary: Read a file from ./files
+      parameters:
+        - name: name
+          in: query
+          required: true
+          schema:
+            type: string
+            example: test.txt
+      responses:
+        '200':
+          description: File contents
+          content:
+            text/plain:
+              schema:
+                type: string
+        '500':
+          description: File could not be read
+  /api/ping:
+    get:
+      summary: Ping a host once
+      parameters:
+        - name: host
+          in: query
+          required: true
+          schema:
+            type: string
+            example: localhost
+      responses:
+        '200':
+          description: Ping output
+          content:
+            text/plain:
+              schema:
+                type: string
+        '400':
+          description: Invalid host
+  /api/admin:
+    get:
+      summary: Admin information
+      responses:
+        '200':
+          description: Admin data
+          content:
+            application/json:
+              schema:
+                type: object
+  /api/token:
+    get:
+      summary: Signed token for a user
+      parameters:
+        - name: user
+          in: query
+          required: false
+          schema:
+            type: string
+            example: alice
+      responses:
+        '200':
+          description: Signed token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+        '503':
+          description: Token signing is not configured
+  /api/greeting:
+    get:
+      summary: Greeting for a name
+      parameters:
+        - name: name
+          in: query
+          required: false
+          schema:
+            type: string
+            example: Alice
+      responses:
+        '200':
+          description: Greeting text
+          content:
+            text/plain:
+              schema:
+                type: string
+  /api/redirect:
+    get:
+      summary: Redirect to a local path
+      parameters:
+        - name: url
+          in: query
+          required: true
+          schema:
+            type: string
+            example: /api/current_time
+      responses:
+        '302':
+          description: Redirect
+        '400':
+          description: Only local redirect targets are allowed

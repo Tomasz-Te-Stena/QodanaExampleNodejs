@@ -15,6 +15,17 @@ variables:
   # Tools
   nucleiVersion: '3.11.1'
   dastFailOn: 'medium,high,critical'   # Nuclei severities that fail the build
+  zapImage: 'ghcr.io/zaproxy/zaproxy:2.17.0'
+  zapFailOnRisk: '2'                   # ZAP risk that fails the build: 3 High, 2 Medium, 1 Low
+  gitleaksImage: 'zricethezav/gitleaks:v8.30.1'
+  hadolintImage: 'hadolint/hadolint:v2.15.1'
+  dockleImage: 'goodwithtech/dockle:v0.4.15'
+  lockfileLintVersion: '5.1.0'
+
+  # SARIF reports of all scanners are collected into this folder and
+  # published as "CodeAnalysisLogs" (read by the "SARIF SAST Scans
+  # Tab" extension, which shows all findings in one tab of the run).
+  sarifDir: '$(Build.ArtifactStagingDirectory)/sarif'
 
 stages:
 
@@ -45,10 +56,24 @@ stages:
             displayName: 'Show Node.js information'
 
           # ====================================================
-          # INSTALL DEPENDENCIES
+          # LOCKFILE LINT (supply chain)
+          # Every package in package-lock.json must come from
+          # registry.npmjs.org over HTTPS, with an integrity hash
+          # and a matching name (rules in .lockfile-lintrc.json).
+          # Blocks a tampered lockfile that points elsewhere.
           # ====================================================
           - script: |
-              npm ci
+              npx --yes lockfile-lint@$(lockfileLintVersion)
+            displayName: 'Lint package-lock.json (lockfile-lint)'
+
+          # ====================================================
+          # INSTALL DEPENDENCIES
+          # --ignore-scripts (used for every npm ci in this
+          # pipeline): package install scripts never run, so a
+          # compromised dependency cannot execute code on the agent.
+          # ====================================================
+          - script: |
+              npm ci --ignore-scripts
             displayName: 'Install dependencies'
 
           # ====================================================
@@ -98,7 +123,7 @@ stages:
               version: '$(nodeVersion)'
 
           - script: |
-              npm ci
+              npm ci --ignore-scripts
             displayName: 'Install dependencies'
 
           # ====================================================
@@ -152,6 +177,41 @@ stages:
             inputs:
               summaryFileLocation: '$(Agent.TempDirectory)/Coverage/coverage.xml'
 
+      # ========================================================
+      # MUTATION TESTING (Stryker)
+      # Stryker changes server.js in small ways (flips conditions,
+      # removes checks, alters regexes) and expects the tests to
+      # fail for each change. The mutation score shows how many
+      # real bugs the tests would catch - coverage alone cannot.
+      # Fails below the "break" threshold in stryker.config.json.
+      # ========================================================
+      - job: MutationTests
+        displayName: 'Mutation tests (Stryker)'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: UseNode@1
+            displayName: 'Install Node.js $(nodeVersion)'
+            inputs:
+              version: '$(nodeVersion)'
+
+          - script: |
+              npm ci --ignore-scripts
+            displayName: 'Install dependencies'
+
+          - script: |
+              npx stryker run --mutate "$(mainFile)"
+            displayName: 'Run Stryker mutation tests'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish mutation report'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(Build.SourcesDirectory)/reports/mutation'
+              artifact: 'mutation-report'
+
 
   # ============================================================
   # SECURITY
@@ -180,7 +240,7 @@ stages:
           # Install dependencies so package-lock/node_modules
           # are available for analysis.
           - script: |
-              npm ci
+              npm ci --ignore-scripts
             displayName: 'Install Node.js dependencies'
 
           - script: |
@@ -206,6 +266,25 @@ stages:
                 --exit-code 1 \
                 "$(Build.SourcesDirectory)"
             displayName: 'Scan Node.js dependencies with Trivy'
+
+          # Same scan as SARIF for the Scans tab (never fails).
+          - script: |
+              mkdir -p "$(sarifDir)"
+
+              trivy fs \
+                --scanners vuln \
+                --format sarif \
+                --output "$(sarifDir)/trivy-fs-vuln.sarif" \
+                "$(Build.SourcesDirectory)"
+            displayName: 'Trivy SCA report (SARIF)'
+            condition: succeededOrFailed()
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-trivy-fs-vuln'
 
 
       # ========================================================
@@ -242,6 +321,98 @@ stages:
                 "$(Build.SourcesDirectory)"
             displayName: 'Scan secrets with Trivy'
 
+          - script: |
+              mkdir -p "$(sarifDir)"
+
+              trivy fs \
+                --scanners secret \
+                --secret-config "$(Build.SourcesDirectory)/trivy-secret.yaml" \
+                --format sarif \
+                --output "$(sarifDir)/trivy-fs-secret.sarif" \
+                "$(Build.SourcesDirectory)"
+            displayName: 'Trivy secrets report (SARIF)'
+            condition: succeededOrFailed()
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-trivy-fs-secret'
+
+
+      # ========================================================
+      # GITLEAKS - SECRETS IN THE WHOLE GIT HISTORY
+      # Trivy only sees the current files. Gitleaks scans every
+      # commit, so a secret that was committed and later deleted
+      # is still found. Accepted old findings are listed (with a
+      # reason) in .gitleaksignore; anything new fails the build.
+      # ========================================================
+      - job: Gitleaks
+        displayName: 'Gitleaks (git history secrets)'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository (full history)'
+            clean: true
+            fetchDepth: 0        # all commits, not a shallow clone
+
+          - script: |
+              mkdir -p "$(sarifDir)"
+              chmod 777 "$(sarifDir)"
+
+              docker run --rm \
+                -v "$(Build.SourcesDirectory):/repo" \
+                -v "$(sarifDir):/out" \
+                "$(gitleaksImage)" \
+                git /repo \
+                --redact \
+                --verbose \
+                --no-banner \
+                --report-format sarif \
+                --report-path /out/gitleaks.sarif
+            displayName: 'Scan git history with Gitleaks'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-gitleaks'
+
+
+      # ========================================================
+      # HADOLINT - DOCKERFILE LINTER
+      # Dockerfile best practices: JSON-form CMD/HEALTHCHECK,
+      # numeric USER, pinned versions, apk/npm cache handling,
+      # merged RUN layers, ... Any finding fails the build.
+      # ========================================================
+      - job: Hadolint
+        displayName: 'Hadolint (Dockerfile lint)'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - script: |
+              docker run --rm -i "$(hadolintImage)" hadolint - < Dockerfile
+            displayName: 'Lint Dockerfile with Hadolint'
+
+          - script: |
+              mkdir -p "$(sarifDir)"
+
+              docker run --rm -i "$(hadolintImage)" hadolint --format sarif --no-fail - \
+                < Dockerfile \
+                > "$(sarifDir)/hadolint.sarif"
+            displayName: 'Hadolint report (SARIF)'
+            condition: succeededOrFailed()
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-hadolint'
+
 
       # ========================================================
       # DEPENDENCY FRESHNESS (information only, never fails)
@@ -259,7 +430,7 @@ stages:
               version: '$(nodeVersion)'
 
           - script: |
-              npm ci
+              npm ci --ignore-scripts
             displayName: 'Install dependencies'
 
           # Prints Current / Wanted / Latest for every package that
@@ -287,7 +458,7 @@ stages:
 
           # npm sbom reads the installed tree, so install first.
           - script: |
-              npm ci
+              npm ci --ignore-scripts
             displayName: 'Install dependencies'
 
           # Built into npm 10.1+, nothing extra to install.
@@ -330,7 +501,7 @@ stages:
               version: '$(nodeVersion)'
 
           - script: |
-              npm ci
+              npm ci --ignore-scripts
             displayName: 'Install Node.js dependencies'
 
 #          - task: Cache@2
@@ -384,22 +555,34 @@ stages:
           # RUN SAST
           # ====================================================
           - script: |
+              mkdir -p "$(sarifDir)"
+
+              # Readable findings in the log + SARIF for the Scans tab.
               semgrep scan \
                 --config p/javascript \
                 --config p/nodejs \
                 --error \
+                --sarif-output="$(sarifDir)/semgrep.sarif" \
                 .
             displayName: 'Run Semgrep SAST'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-semgrep'
 
 
   # ============================================================
   # CONTAINER SECURITY
-  # Builds the Docker image once, then two jobs run in parallel
+  # Builds the Docker image once, then three jobs run in parallel
   # on exactly that image:
   #   - TrivyContainer: Dockerfile config, image SCA, secrets,
-  #                     container SBOM + license reports
-  #   - SmokeAndDAST:   starts the container, smoke-tests the API,
-  #                     runs Nuclei DAST against it
+  #                     Dockle (CIS), container SBOM + licenses
+  #   - SmokeAndDAST:   starts a locked-down container, smoke-tests
+  #                     the API, runs Nuclei DAST against it
+  #   - ZapDAST:        OWASP ZAP API scan driven by openapi.yaml
   # ============================================================
   - stage: ContainerSecurity
     displayName: 'Container Security'
@@ -531,6 +714,41 @@ stages:
             condition: succeededOrFailed()
 
           # ====================================================
+          # DOCKLE - CIS DOCKER BENCHMARK ON THE BUILT IMAGE
+          # Checks the image itself (not the Dockerfile): runs as
+          # root, setuid/setgid files, credentials left in files
+          # or ENV, missing HEALTHCHECK, ... WARN and FATAL fail.
+          # ====================================================
+          - script: |
+              docker run --rm \
+                -v /var/run/docker.sock:/var/run/docker.sock \
+                "$(dockleImage)" \
+                --exit-code 1 \
+                --exit-level warn \
+                "$(imageName):$(imageTag)"
+            displayName: 'Check image with Dockle (CIS benchmark)'
+            condition: succeededOrFailed()
+
+          # Image vulnerabilities + secrets as SARIF (never fails).
+          - script: |
+              mkdir -p "$(sarifDir)"
+
+              trivy image \
+                --scanners vuln,secret \
+                --format sarif \
+                --output "$(sarifDir)/trivy-image.sarif" \
+                "$(imageName):$(imageTag)"
+            displayName: 'Trivy image report (SARIF)'
+            condition: succeededOrFailed()
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-trivy-image'
+
+          # ====================================================
           # CONTAINER SBOM
           # Unlike "npm sbom" (npm packages from the source), this
           # covers everything in the final image: Alpine OS
@@ -596,9 +814,16 @@ stages:
             displayName: 'Load Docker image'
 
           # ====================================================
-          # START CONTAINER
+          # START CONTAINER (LOCKED DOWN)
           # A throwaway RSA key is generated for this run only,
           # so /api/token works without any stored secret.
+          # The container runs the way production should run it,
+          # which proves the app works with minimal rights:
+          #   --read-only          root filesystem cannot be changed
+          #   --tmpfs /tmp         the only writable place, in memory
+          #   --cap-drop ALL       no Linux capabilities at all
+          #   no-new-privileges    setuid binaries cannot gain rights
+          #   --pids-limit/memory  a runaway process cannot take the host
           # ====================================================
           - script: |
               set -e
@@ -611,6 +836,12 @@ stages:
               docker run --detach \
                 --name "$(containerName)" \
                 --publish 8080:8080 \
+                --read-only \
+                --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+                --cap-drop ALL \
+                --security-opt no-new-privileges \
+                --pids-limit 100 \
+                --memory 256m \
                 --env TOKEN_SIGNING_KEY="$(cat "$(Agent.TempDirectory)/signing-key.pem")" \
                 "$(imageName):$(imageTag)"
 
@@ -680,6 +911,16 @@ stages:
               check 'greeting'         '/api/greeting?name=Alice'   200 'Hello, Alice!'
               check 'token'            '/api/token?user=alice'      200 'token'
               check 'unknown endpoint' '/api/does-not-exist'        404 'Not found'
+              check 'ping (no caps)'   '/api/ping?host=127.0.0.1'   200 '1 packets received'
+
+              # Node permission model (see Dockerfile CMD): reading
+              # outside /app must be refused even via path traversal.
+              if curl --silent --max-time 5 "$BASE/api/file?name=../../etc/passwd" | grep -q 'root:'; then
+                echo "FAIL  permission model: /etc/passwd is readable"
+                FAILED=1
+              else
+                echo "PASS  permission model blocks /etc/passwd"
+              fi
 
               if [ "$FAILED" -ne 0 ]; then
                 echo "========== CONTAINER LOG =========="
@@ -735,16 +976,24 @@ stages:
               $BASE/api/token?user=alice
               EOF
 
+              mkdir -p "$(sarifDir)"
+
               nuclei \
                 -list "$(Agent.TempDirectory)/dast-urls.txt" \
                 -dast \
                 -timeout 6 \
                 -retries 1 \
                 -no-color \
-                -jsonl-export "$(Agent.TempDirectory)/nuclei-findings.jsonl"
+                -jsonl-export "$(Agent.TempDirectory)/nuclei-findings.jsonl" \
+                -sarif-export "$(sarifDir)/nuclei.sarif"
 
               FINDINGS="$(Agent.TempDirectory)/nuclei-findings.jsonl"
               touch "$FINDINGS"
+
+              # Nuclei writes no SARIF when nothing is found; an empty
+              # file keeps the publish step working (the Reports stage
+              # skips empty files).
+              touch "$(sarifDir)/nuclei.sarif"
 
               FAILED=0
 
@@ -769,8 +1018,189 @@ stages:
             displayName: 'Nuclei DAST scan'
             timeoutInMinutes: 10
 
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-nuclei'
+
           # Always clean up
           - script: |
               docker rm --force "$(containerName)" || true
             displayName: 'Stop container'
             condition: always()
+
+
+      # ========================================================
+      # OWASP ZAP API SCAN
+      # A second DAST scanner with different checks than Nuclei:
+      # path traversal, SQL / OS command / template injection,
+      # missing security headers, error disclosure, ... It reads
+      # openapi.yaml, so it knows every endpoint and parameter.
+      # Alerts with risk >= $(zapFailOnRisk) fail the job; all
+      # alerts are in the HTML / JSON report artifact.
+      # ========================================================
+      - job: ZapDAST
+        displayName: 'OWASP ZAP API scan'
+        dependsOn: BuildContainer
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Docker image'
+            inputs:
+              artifact: 'docker-image'
+              path: '$(Pipeline.Workspace)/docker'
+
+          - script: |
+              docker load -i "$(Pipeline.Workspace)/docker/$(imageName).tar"
+            displayName: 'Load Docker image'
+
+          - script: |
+              set -e
+
+              openssl genpkey \
+                -algorithm RSA \
+                -pkeyopt rsa_keygen_bits:2048 \
+                -out "$(Agent.TempDirectory)/signing-key.pem" 2>/dev/null
+
+              docker run --detach \
+                --name "$(containerName)-zap" \
+                --publish 8080:8080 \
+                --read-only \
+                --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+                --cap-drop ALL \
+                --security-opt no-new-privileges \
+                --env TOKEN_SIGNING_KEY="$(cat "$(Agent.TempDirectory)/signing-key.pem")" \
+                "$(imageName):$(imageTag)"
+
+              rm -f "$(Agent.TempDirectory)/signing-key.pem"
+
+              for i in $(seq 1 30); do
+                if [ "$(docker inspect --format='{{.State.Health.Status}}' "$(containerName)-zap")" = "healthy" ]; then
+                  echo "Container is healthy."
+                  exit 0
+                fi
+                sleep 2
+              done
+
+              echo "Container did not become healthy in time."
+              docker logs "$(containerName)-zap"
+              exit 1
+            displayName: 'Start container'
+
+          # ZAP runs as its own user inside its container, so the
+          # report folder must be writable for it.
+          - script: |
+              ZAP_DIR="$(Agent.TempDirectory)/zap"
+              mkdir -p "$ZAP_DIR"
+              chmod 777 "$ZAP_DIR"
+              cp openapi.yaml "$ZAP_DIR/"
+
+              # -I: warnings do not set the exit code; the risk
+              # threshold below decides instead.
+              docker run --rm \
+                --network host \
+                -v "$ZAP_DIR:/zap/wrk:rw" \
+                "$(zapImage)" \
+                zap-api-scan.py \
+                  -t openapi.yaml \
+                  -f openapi \
+                  -O http://localhost:8080 \
+                  -r zap-report.html \
+                  -J zap-report.json \
+                  -I
+              ZAP_EXIT=$?
+
+              if [ ! -f "$ZAP_DIR/zap-report.json" ]; then
+                echo "##vso[task.logissue type=error]ZAP did not produce a report (exit code $ZAP_EXIT)."
+                exit 1
+              fi
+
+              FAILED=0
+
+              BLOCKING=$(jq --arg min "$(zapFailOnRisk)" \
+                '[.site[].alerts[] | select((.riskcode | tonumber) >= ($min | tonumber))] | length' \
+                "$ZAP_DIR/zap-report.json")
+              echo "ZAP alerts with risk >= $(zapFailOnRisk): $BLOCKING"
+
+              if [ "$BLOCKING" -gt 0 ]; then
+                jq -r --arg min "$(zapFailOnRisk)" \
+                  '.site[].alerts[] | select((.riskcode | tonumber) >= ($min | tonumber)) | "  \(.riskdesc): \(.alert) (\(.count)x)"' \
+                  "$ZAP_DIR/zap-report.json"
+                echo "##vso[task.logissue type=error]ZAP found $BLOCKING alert(s) with risk >= $(zapFailOnRisk)."
+                FAILED=1
+              fi
+
+              if [ "$(docker inspect --format='{{.State.Running}}' "$(containerName)-zap")" != "true" ]; then
+                echo "##vso[task.logissue type=error]The container crashed during the ZAP scan (denial of service)."
+                docker logs --tail 30 "$(containerName)-zap"
+                FAILED=1
+              fi
+
+              exit $FAILED
+            displayName: 'OWASP ZAP API scan'
+            timeoutInMinutes: 15
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish ZAP report'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(Agent.TempDirectory)/zap'
+              artifact: 'zap-report'
+
+          - script: |
+              docker rm --force "$(containerName)-zap" || true
+            displayName: 'Stop container'
+            condition: always()
+
+
+  # ============================================================
+  # REPORTS
+  # Collects the SARIF files of every scanner (Trivy, Gitleaks,
+  # Hadolint, Semgrep, Nuclei) into one "CodeAnalysisLogs"
+  # artifact. With the free "SARIF SAST Scans Tab" extension
+  # (Microsoft DevLabs) installed in the Azure DevOps
+  # organisation, all findings show in a "Scans" tab of the run.
+  # Runs even when earlier stages failed - that is when the
+  # findings matter most.
+  # ============================================================
+  - stage: Reports
+    displayName: 'Security reports'
+    dependsOn:
+      - Security
+      - ContainerSecurity
+    condition: always()
+
+    jobs:
+      - job: CollectSarif
+        displayName: 'Collect SARIF reports'
+        steps:
+          - checkout: none
+
+          # Downloads every artifact named sarif-* (each into its
+          # own folder); missing ones (skipped jobs) are fine.
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download SARIF artifacts'
+            inputs:
+              buildType: current
+              itemPattern: 'sarif-*/**'
+              path: '$(Pipeline.Workspace)/sarif-in'
+
+          - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs"
+
+              find "$(Pipeline.Workspace)/sarif-in" -name '*.sarif' -size +0 \
+                -exec cp {} "$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs/" \;
+
+              ls -la "$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs"
+            displayName: 'Merge SARIF files'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish CodeAnalysisLogs'
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs'
+              artifact: 'CodeAnalysisLogs'

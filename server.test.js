@@ -12,7 +12,9 @@ const crypto = require('crypto');
 const { Buffer } = require('buffer');
 const { execFile } = require('child_process');
 
-const { requestHandler } = require('./server');
+const fc = require('fast-check');
+
+const { requestHandler, isValidHost, isSafeRedirect } = require('./server');
 
 describe('Vulnerable REST API', () => {
 
@@ -72,6 +74,7 @@ describe('Vulnerable REST API', () => {
         ['absolute URL', 'https://evil.example'],
         ['protocol-relative URL', '//evil.example'],
         ['backslash trick', '/\\evil.example'],
+        ['tab trick (browser strips it)', '/\t/evil.example'],
         ['javascript: URL', 'javascript:alert(1)'],
         ['relative path without leading slash', 'evil.example']
     ])('GET /api/redirect rejects %s (no open redirect)', async (_name, target) => {
@@ -370,8 +373,11 @@ describe('Vulnerable REST API', () => {
                 .get('/api/redirect?url=/home%0D%0ASet-Cookie:x=1')
                 .expect(400);
 
+            // Rejected by isSafeRedirect before any header is written.
             expect(response.headers['set-cookie']).toBeUndefined();
-            expect(response.body).toEqual({ error: 'Bad request' });
+            expect(response.body).toEqual({
+                error: 'Only local redirect targets are allowed'
+            });
         });
 
         test('server keeps answering after a malformed request', async () => {
@@ -393,6 +399,88 @@ describe('Vulnerable REST API', () => {
             requestHandler(req, res);
 
             expect(res.destroy).toHaveBeenCalled();
+        });
+    });
+
+    // ==========================================================
+    // PROPERTY-BASED TESTS (fast-check)
+    // Instead of a few hand-picked inputs, fast-check generates
+    // thousands of random strings (including unicode, control and
+    // shell characters) and checks a rule that must always hold.
+    // ==========================================================
+    describe('input validators (property-based)', () => {
+        const SHELL_OR_SPACE = /[\s;|&$`'"<>(){}[\]\\*?!#~%^=,\0]/;
+
+        test('isValidHost never accepts shell characters, spaces or a leading "-"', () => {
+            fc.assert(fc.property(fc.string({ unit: 'binary' }), (host) => {
+                if (isValidHost(host)) {
+                    expect(host).not.toMatch(SHELL_OR_SPACE);
+                    expect(host.startsWith('-')).toBe(false);
+                    expect(host.length).toBeLessThanOrEqual(253);
+                }
+            }), { numRuns: 5000 });
+        });
+
+        test('isValidHost accepts every generated domain name and IP address', () => {
+            fc.assert(fc.property(
+                fc.oneof(fc.domain(), fc.ipV4(), fc.ipV6()),
+                (host) => {
+                    expect(isValidHost(host)).toBe(true);
+                }
+            ), { numRuns: 2000 });
+        });
+
+        test('isSafeRedirect only accepts targets that stay on the same origin', () => {
+            const origin = 'http://app.example';
+
+            fc.assert(fc.property(
+                fc.oneof(
+                    fc.string({ unit: 'binary' }),
+                    // Short strings from the characters that matter for
+                    // URL parsing, so tricky combinations are found fast.
+                    fc.array(
+                        fc.constantFrom('/', '\\', '\t', '\n', '\r', ' ', '\u0000', 'a', '.', ':', '@', '%', '?', '#'),
+                        { maxLength: 8 }
+                    ).map((chars) => chars.join('')),
+                    fc.webUrl(),
+                    fc.string().map((s) => '/' + s),
+                    fc.string().map((s) => '//' + s),
+                    fc.string().map((s) => '/\\' + s)
+                ),
+                (target) => {
+                    if (isSafeRedirect(target)) {
+                        // How a browser resolves the Location header.
+                        expect(new URL(target, origin + '/api/redirect').origin).toBe(origin);
+                    }
+                }
+            ), { numRuns: 5000 });
+        });
+
+        test('isSafeRedirect: no "/" + whitespace/control trick escapes the origin', () => {
+            // Browsers strip tab / CR / LF from URLs, so "/\t/evil.com"
+            // becomes "//evil.com" (another site). This found that bypass.
+            const origin = 'http://app.example';
+
+            fc.assert(fc.property(
+                fc.array(
+                    fc.constantFrom('/', '\\', '\t', '\n', '\r', ' ', '\u0000', '\u000b', '\u000c', 'a', '.', ':', '@'),
+                    { minLength: 1, maxLength: 6 }
+                ).map((chars) => '/' + chars.join('')),
+                (target) => {
+                    if (isSafeRedirect(target)) {
+                        expect(new URL(target, origin + '/api/redirect').origin).toBe(origin);
+                    }
+                }
+            ), { numRuns: 10000 });
+        });
+
+        test('isSafeRedirect accepts every local path', () => {
+            fc.assert(fc.property(
+                fc.webPath().filter((p) => p.startsWith('/') && !/^\/[/\\]/.test(p)),
+                (path) => {
+                    expect(isSafeRedirect(path)).toBe(true);
+                }
+            ), { numRuns: 2000 });
         });
     });
 

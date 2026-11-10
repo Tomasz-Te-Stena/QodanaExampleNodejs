@@ -9,6 +9,8 @@ module.exports = [
         ignores: [
             'node_modules/**',
             'coverage/**',
+            'reports/**',
+            '.stryker-tmp/**',
             '.idea/**'
         ],
     },
@@ -45,6 +47,7 @@ module.exports = [
                 module: 'readonly',
                 __dirname: 'readonly',
                 __filename: 'readonly',
+                URL: 'readonly',
 
                 // Jest
                 describe: 'readonly',

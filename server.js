@@ -53,9 +53,15 @@ function renderGreeting(name) {
 
 // FIXED (was SECURITY ERROR #6: open redirect).
 // Only local paths are allowed: "/something", but not "//host" or
-// "/\host", which browsers treat as a different site.
+// "/\host", which browsers treat as a different site. Whitespace and
+// control characters are rejected too: browsers strip tab / CR / LF
+// from URLs, so "/\t/evil.com" would become "//evil.com" (found by
+// the fast-check property test).
 function isSafeRedirect(target) {
-    return typeof target === 'string' && /^\/(?![/\\])/.test(target);
+    return typeof target === 'string'
+        && /^\/(?![/\\])/.test(target)
+        && !/\s/.test(target)
+        && ![...target].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f);
 }
 
 // Hostname, IPv4 or IPv6 address only: letters, digits, ".", "-"
@@ -253,4 +259,5 @@ if (require.main === module) {
 }
 
 // Jest can import this without starting port 8080.
-module.exports = { requestHandler };
+// The validators are exported for the property-based tests.
+module.exports = { requestHandler, isValidHost, isSafeRedirect };

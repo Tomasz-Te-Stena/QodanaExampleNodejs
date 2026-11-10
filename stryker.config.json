@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "Mutation testing: Stryker changes server.js in small ways (flips conditions, removes checks, changes regexes) and expects the Jest tests to fail for every change. A surviving mutant is a code change no test notices.",
+  "packageManager": "npm",
+  "testRunner": "jest",
+  "coverageAnalysis": "perTest",
+  "mutate": ["server.js"],
+  "jest": {
+    "configFile": "package.json",
+    "enableFindRelatedTests": false
+  },
+  "reporters": ["clear-text", "progress", "html", "json"],
+  "htmlReporter": { "fileName": "reports/mutation/mutation.html" },
+  "jsonReporter": { "fileName": "reports/mutation/mutation.json" },
+  "thresholds": { "high": 85, "low": 70, "break": 70 },
+  "tempDirName": ".stryker-tmp"
+}

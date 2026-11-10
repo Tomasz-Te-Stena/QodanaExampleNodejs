@@ -150,3 +150,7 @@ vite.config.ts.timestamp-*
 
 # Corporate TLS-inspection CA (exported locally, needed only for Docker builds behind the proxy)
 corporate-ca.crt
+
+# Stryker mutation testing (report + sandbox)
+reports/
+.stryker-tmp/
