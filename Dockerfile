@@ -4,7 +4,7 @@
 # Base image pinned by digest: every build uses exactly the same
 # image (a re-pushed "26-alpine" tag cannot change it silently).
 # Renovate keeps the digest up to date.
-FROM node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS build
+FROM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS build
 
 WORKDIR /app
 
@@ -51,7 +51,7 @@ RUN npm prune --omit=dev \
 # ============================================================
 # STAGE 2 - RUNTIME
 # ============================================================
-FROM node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS runner
+FROM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS runner
 
 WORKDIR /app
 
